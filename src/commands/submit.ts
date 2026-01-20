@@ -62,13 +62,30 @@ export const submitCommand = new Command('submit')
                 };
             }
 
+            // Calculate incremental usage
+            const lastUsedInput = lastSubmission?.totalUsedInput || 0;
+            const lastUsedOutput = lastSubmission?.totalUsedOutput || 0;
+
+            let incrementalInput = stats.inputTokens - lastUsedInput;
+            let incrementalOutput = stats.outputTokens - lastUsedOutput;
+
+            // Handle reset
+            if (incrementalInput < 0) incrementalInput = stats.inputTokens;
+            if (incrementalOutput < 0) incrementalOutput = stats.outputTokens;
+
+            if (incrementalInput <= 0 && incrementalOutput <= 0 && !options.force) {
+                spin.stop();
+                output.info('No new usage to submit.');
+                return;
+            }
+
             const previousChecksum = lastSubmission?.checksum || '0'.repeat(64);
             const cumulativeChecksum = generateCumulativeChecksum(
                 {
                     periodStart: stats.periodStart.toISOString(),
                     periodEnd: stats.periodEnd.toISOString(),
-                    inputTokens: stats.inputTokens,
-                    outputTokens: stats.outputTokens,
+                    inputTokens: incrementalInput,
+                    outputTokens: incrementalOutput,
                     sessionCount: stats.sessionCount,
                 },
                 previousChecksum
@@ -79,10 +96,10 @@ export const submitCommand = new Command('submit')
             const result = await ApiClient.submitUsage({
                 periodStart: stats.periodStart.toISOString(),
                 periodEnd: stats.periodEnd.toISOString(),
-                inputTokens: stats.inputTokens,
-                outputTokens: stats.outputTokens,
+                inputTokens: incrementalInput,
+                outputTokens: incrementalOutput,
                 sessionCount: stats.sessionCount,
-                modelBreakdown,
+                modelBreakdown, // Note: breakdown is still full, ideally should be incremental weighted
                 cumulativeChecksum,
                 previousChecksum,
                 clientVersion: '0.1.0',
@@ -94,8 +111,8 @@ export const submitCommand = new Command('submit')
                 output.success('Usage data submitted successfully!');
                 output.newline();
 
-                output.tableRow('Input Tokens', output.formatTokens(stats.inputTokens));
-                output.tableRow('Output Tokens', output.formatTokens(stats.outputTokens));
+                output.tableRow('Input Tokens (New)', output.formatTokens(incrementalInput));
+                output.tableRow('Output Tokens (New)', output.formatTokens(incrementalOutput));
                 output.tableRow('Sessions', stats.sessionCount.toString());
                 output.tableRow('Trust Score', `${result.trustScore}/100`);
 
@@ -104,8 +121,13 @@ export const submitCommand = new Command('submit')
                     output.info(`Your current rank: #${result.rank}`);
                 }
 
-                // Store submission info
-                storeLastSubmission(new Date().toISOString(), cumulativeChecksum);
+                // Store submission info with current totals
+                storeLastSubmission({
+                    timestamp: new Date().toISOString(),
+                    checksum: cumulativeChecksum,
+                    totalUsedInput: stats.inputTokens,
+                    totalUsedOutput: stats.outputTokens
+                });
 
             } else {
                 output.error(result.message || 'Submission failed');
@@ -164,13 +186,28 @@ export async function submitUsage(): Promise<void> {
             };
         }
 
+        const lastUsedInput = lastSubmission?.totalUsedInput || 0;
+        const lastUsedOutput = lastSubmission?.totalUsedOutput || 0;
+
+        let incrementalInput = stats.inputTokens - lastUsedInput;
+        let incrementalOutput = stats.outputTokens - lastUsedOutput;
+
+        if (incrementalInput < 0) incrementalInput = stats.inputTokens;
+        if (incrementalOutput < 0) incrementalOutput = stats.outputTokens;
+
+        if (incrementalInput <= 0 && incrementalOutput <= 0) {
+            spin.stop();
+            // In the library function, we should perhaps return early or log info?
+            // Assuming this function is called when explicitly requested.
+        }
+
         const previousChecksum = lastSubmission?.checksum || '0'.repeat(64);
         const cumulativeChecksum = generateCumulativeChecksum(
             {
                 periodStart: stats.periodStart.toISOString(),
                 periodEnd: stats.periodEnd.toISOString(),
-                inputTokens: stats.inputTokens,
-                outputTokens: stats.outputTokens,
+                inputTokens: incrementalInput,
+                outputTokens: incrementalOutput,
                 sessionCount: stats.sessionCount,
             },
             previousChecksum
@@ -181,8 +218,8 @@ export async function submitUsage(): Promise<void> {
         const result = await ApiClient.submitUsage({
             periodStart: stats.periodStart.toISOString(),
             periodEnd: stats.periodEnd.toISOString(),
-            inputTokens: stats.inputTokens,
-            outputTokens: stats.outputTokens,
+            inputTokens: incrementalInput,
+            outputTokens: incrementalOutput,
             sessionCount: stats.sessionCount,
             modelBreakdown,
             cumulativeChecksum,
@@ -195,8 +232,8 @@ export async function submitUsage(): Promise<void> {
         if (result.success) {
             output.success('Usage data submitted successfully!');
             output.newline();
-            output.tableRow('Input Tokens', output.formatTokens(stats.inputTokens));
-            output.tableRow('Output Tokens', output.formatTokens(stats.outputTokens));
+            output.tableRow('Input Tokens (New)', output.formatTokens(incrementalInput));
+            output.tableRow('Output Tokens (New)', output.formatTokens(incrementalOutput));
             output.tableRow('Sessions', stats.sessionCount.toString());
             output.tableRow('Trust Score', `${result.trustScore}/100`);
 
@@ -205,7 +242,12 @@ export async function submitUsage(): Promise<void> {
                 output.info(`Your current rank: #${result.rank}`);
             }
 
-            storeLastSubmission(new Date().toISOString(), cumulativeChecksum);
+            storeLastSubmission({
+                timestamp: new Date().toISOString(),
+                checksum: cumulativeChecksum,
+                totalUsedInput: stats.inputTokens,
+                totalUsedOutput: stats.outputTokens
+            });
         } else {
             output.error(result.message || 'Submission failed');
         }

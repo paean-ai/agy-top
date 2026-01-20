@@ -232,64 +232,7 @@ async function checkAndAutoSubmit(state: DashboardState): Promise<void> {
 
     if (usageChanged && timeSinceLastSubmit >= minInterval) {
         try {
-            const snapshot = state.snapshot;
-
-            // Calculate real token usage
-            const promptMonthly = snapshot.tokenUsage?.promptCredits?.monthly || 0;
-            const flowMonthly = snapshot.tokenUsage?.flowCredits?.monthly || 0;
-            const usedPrompt = promptMonthly - currPrompt;
-            const usedFlow = flowMonthly - currFlow;
-
-            const inputTokens = usedPrompt;
-            const outputTokens = usedFlow;
-
-            // Build model breakdown
-            const modelBreakdown: Record<string, { inputTokens: number; outputTokens: number; sessions: number }> = {};
-            const activeModels = snapshot.models.filter(m => m.remainingPercentage < 100);
-
-            for (const model of snapshot.models) {
-                const usedPercentage = 100 - model.remainingPercentage;
-                const modelTokenShare = (usedPrompt + usedFlow) * (usedPercentage / 100) / Math.max(1, activeModels.length);
-
-                modelBreakdown[model.modelId] = {
-                    inputTokens: Math.floor(modelTokenShare * 0.6),
-                    outputTokens: Math.floor(modelTokenShare * 0.4),
-                    sessions: usedPercentage > 0 ? 1 : 0,
-                };
-            }
-
-            const sessionCount = activeModels.length || 1;
-
-            // Weekly period
-            const now = new Date();
-            const weekStart = new Date(now);
-            weekStart.setDate(weekStart.getDate() - weekStart.getDay());
-            weekStart.setHours(0, 0, 0, 0);
-
-            const periodStart = weekStart.toISOString();
-            const periodEnd = now.toISOString();
-
-            const lastSubmission = getLastSubmission();
-            const previousChecksum = lastSubmission?.checksum || '0'.repeat(64);
-            const cumulativeChecksum = generateCumulativeChecksum(
-                { periodStart, periodEnd, inputTokens, outputTokens, sessionCount },
-                previousChecksum
-            );
-
-            await ApiClient.submitUsage({
-                periodStart,
-                periodEnd,
-                inputTokens,
-                outputTokens,
-                sessionCount,
-                modelBreakdown,
-                cumulativeChecksum,
-                previousChecksum,
-                clientVersion: VERSION,
-            });
-
-            state.lastSubmitTime = new Date();
-            storeLastSubmission(new Date().toISOString(), cumulativeChecksum);
+            await doSubmit(state);
         } catch {
             // Silently fail auto-submit
         }
@@ -311,75 +254,9 @@ async function performSubmit(state: DashboardState): Promise<void> {
     }
 
     try {
-        const snapshot = state.snapshot;
+        const result = await doSubmit(state);
 
-        // Calculate token usage from credits
-        const promptMonthly = snapshot.tokenUsage?.promptCredits?.monthly || 0;
-        const promptAvailable = snapshot.tokenUsage?.promptCredits?.available || 0;
-        const flowMonthly = snapshot.tokenUsage?.flowCredits?.monthly || 0;
-        const flowAvailable = snapshot.tokenUsage?.flowCredits?.available || 0;
-
-        const usedPrompt = promptMonthly - promptAvailable;
-        const usedFlow = flowMonthly - flowAvailable;
-
-        // Use prompt credits as input tokens, flow credits as output tokens
-        const inputTokens = usedPrompt;
-        const outputTokens = usedFlow;
-
-        // Build real model breakdown from snapshot
-        const modelBreakdown: Record<string, { inputTokens: number; outputTokens: number; sessions: number }> = {};
-        const activeModels = snapshot.models.filter(m => m.remainingPercentage < 100);
-
-        for (const model of snapshot.models) {
-            // Calculate tokens used per model based on usage percentage
-            const usedPercentage = 100 - model.remainingPercentage;
-            const modelTokenShare = (usedPrompt + usedFlow) * (usedPercentage / 100) / Math.max(1, activeModels.length);
-
-            modelBreakdown[model.modelId] = {
-                inputTokens: Math.floor(modelTokenShare * 0.6),
-                outputTokens: Math.floor(modelTokenShare * 0.4),
-                sessions: usedPercentage > 0 ? 1 : 0,
-            };
-        }
-
-        // Session count = number of models with usage
-        const sessionCount = activeModels.length || 1;
-
-        // Period: use current reset period (weekly)
-        const now = new Date();
-        const weekStart = new Date(now);
-        weekStart.setDate(weekStart.getDate() - weekStart.getDay()); // Sunday
-        weekStart.setHours(0, 0, 0, 0);
-
-        const periodStart = weekStart.toISOString();
-        const periodEnd = now.toISOString();
-
-        // Get previous checksum from last submission
-        const lastSubmission = getLastSubmission();
-        const previousChecksum = lastSubmission?.checksum || '0'.repeat(64);
-
-        // Generate cumulative checksum
-        const cumulativeChecksum = generateCumulativeChecksum(
-            { periodStart, periodEnd, inputTokens, outputTokens, sessionCount },
-            previousChecksum
-        );
-
-        const result = await ApiClient.submitUsage({
-            periodStart,
-            periodEnd,
-            inputTokens,
-            outputTokens,
-            sessionCount,
-            modelBreakdown,
-            cumulativeChecksum,
-            previousChecksum,
-            clientVersion: VERSION,
-        });
-
-        state.lastSubmitTime = new Date();
         if (result.success) {
-            // Store this submission for next time
-            storeLastSubmission(new Date().toISOString(), cumulativeChecksum);
             state.submitMessage = `✓ Submitted! Rank: #${result.rank || 'N/A'} | Trust: ${result.trustScore}/100`;
         } else {
             state.submitMessage = `⚠ ${result.message || 'Submission failed'}`;
@@ -387,6 +264,111 @@ async function performSubmit(state: DashboardState): Promise<void> {
     } catch (error) {
         state.submitMessage = `✗ Error: ${error instanceof Error ? error.message : 'Submit failed'}`;
     }
+}
+
+/**
+ * Shared submission logic
+ */
+async function doSubmit(state: DashboardState): Promise<{ success: boolean; rank?: number; trustScore?: number; message?: string }> {
+    const snapshot = state.snapshot!;
+
+    // Calculate current cumulative usage
+    const promptMonthly = snapshot.tokenUsage?.promptCredits?.monthly || 0;
+    const flowMonthly = snapshot.tokenUsage?.flowCredits?.monthly || 0;
+    const promptAvailable = snapshot.tokenUsage?.promptCredits?.available || 0;
+    const flowAvailable = snapshot.tokenUsage?.flowCredits?.available || 0;
+
+    const currentUsedPrompt = promptMonthly - promptAvailable;
+    const currentUsedFlow = flowMonthly - flowAvailable;
+
+    // Get last submission usage to calculate incremental diff
+    const lastSubmission = getLastSubmission();
+    const lastUsedPrompt = lastSubmission?.totalUsedInput || 0;
+    const lastUsedFlow = lastSubmission?.totalUsedOutput || 0;
+
+    // Calculate increment (handle monthly resets where current < last)
+    let incrementalInput = currentUsedPrompt - lastUsedPrompt;
+    let incrementalOutput = currentUsedFlow - lastUsedFlow;
+
+    // If quota reset happened (current < last), we assume the entire current usage is new
+    // except if we detected it's just a small glitch, but typically reset means reset.
+    if (incrementalInput < 0) incrementalInput = currentUsedPrompt;
+    if (incrementalOutput < 0) incrementalOutput = currentUsedFlow;
+
+    if (incrementalInput <= 0 && incrementalOutput <= 0) {
+        return { success: false, message: 'No new usage to submit' };
+    }
+
+    // Build model breakdown for this increment
+    // Note: We can't perfectly attribute the *increment* to specific models without tracking per-model usage history.
+    // We approximate by distributing the incremental tokens based on current model usage weighting.
+    const modelBreakdown: Record<string, { inputTokens: number; outputTokens: number; sessions: number }> = {};
+    const activeModels = snapshot.models.filter(m => m.remainingPercentage < 100);
+    const totalIncremental = incrementalInput + incrementalOutput;
+
+    // Calculate total weighted usage for distribution
+    let totalWeight = 0;
+    const modelWeights: { id: string; weight: number }[] = [];
+
+    for (const model of activeModels) {
+        const usedPercentage = 100 - model.remainingPercentage;
+        totalWeight += usedPercentage;
+        modelWeights.push({ id: model.modelId, weight: usedPercentage });
+    }
+
+    if (totalWeight > 0) {
+        for (const mw of modelWeights) {
+            const share = mw.weight / totalWeight;
+            const modelTokens = totalIncremental * share;
+            modelBreakdown[mw.id] = {
+                inputTokens: Math.floor(modelTokens * 0.6),
+                outputTokens: Math.floor(modelTokens * 0.4),
+                sessions: 1, // Active in this period
+            };
+        }
+    }
+
+    const sessionCount = activeModels.length || 1;
+
+    // Period: One week window ending now
+    // NOTE: This overlaps, but since we submit INCREMENTAL tokens, the backend addition logic is correct.
+    const now = new Date();
+    const weekStart = new Date(now);
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+    weekStart.setHours(0, 0, 0, 0);
+
+    const periodStart = weekStart.toISOString();
+    const periodEnd = now.toISOString();
+
+    const previousChecksum = lastSubmission?.checksum || '0'.repeat(64);
+    const cumulativeChecksum = generateCumulativeChecksum(
+        { periodStart, periodEnd, inputTokens: incrementalInput, outputTokens: incrementalOutput, sessionCount },
+        previousChecksum
+    );
+
+    const result = await ApiClient.submitUsage({
+        periodStart,
+        periodEnd,
+        inputTokens: incrementalInput,
+        outputTokens: incrementalOutput,
+        sessionCount,
+        modelBreakdown,
+        cumulativeChecksum,
+        previousChecksum,
+        clientVersion: VERSION,
+    });
+
+    if (result.success) {
+        state.lastSubmitTime = new Date();
+        storeLastSubmission({
+            timestamp: new Date().toISOString(),
+            checksum: cumulativeChecksum,
+            totalUsedInput: currentUsedPrompt,
+            totalUsedOutput: currentUsedFlow
+        });
+    }
+
+    return result;
 }
 
 /**

@@ -18,6 +18,8 @@ interface ConfigSchema {
     lastSubmission?: {
         timestamp: string;
         checksum: string;
+        totalUsedInput?: number;
+        totalUsedOutput?: number;
     };
 }
 
@@ -131,13 +133,13 @@ export function getEmail(): string | undefined {
 /**
  * Store last submission info
  */
-export function storeLastSubmission(timestamp: string, checksum: string): void {
-    config.set('lastSubmission', { timestamp, checksum });
+export function storeLastSubmission(data: { timestamp: string; checksum: string; totalUsedInput: number; totalUsedOutput: number }): void {
+    config.set('lastSubmission', data);
 }
 
 /**
  * Get last submission info
  */
-export function getLastSubmission(): { timestamp: string; checksum: string } | undefined {
+export function getLastSubmission(): { timestamp: string; checksum: string; totalUsedInput?: number; totalUsedOutput?: number } | undefined {
     return config.get('lastSubmission');
 }
