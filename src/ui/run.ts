@@ -7,8 +7,9 @@ import logUpdate from 'log-update';
 import chalk from 'chalk';
 import { detectAntigravityServer, type ServerInfo } from '../data/server-detector.js';
 import { fetchQuota, type QuotaSnapshot } from '../data/quota-service.js';
-import { isAuthenticated } from '../utils/config.js';
+import { isAuthenticated, getLastSubmission, storeLastSubmission } from '../utils/config.js';
 import { formatTokens, progressBar, miniBar } from '../utils/output.js';
+import { generateCumulativeChecksum } from '../utils/crypto.js';
 import { ApiClient } from '../api/client.js';
 import type { DashboardOptions, WeeklyTrend, LeaderboardData } from '../types/index.js';
 
@@ -234,18 +235,33 @@ async function checkAndAutoSubmit(state: DashboardState): Promise<void> {
             const totalTokens = (state.snapshot.tokenUsage?.promptCredits?.monthly || 0) - currPrompt +
                 (state.snapshot.tokenUsage?.flowCredits?.monthly || 0) - currFlow;
 
+            const periodStart = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+            const periodEnd = new Date().toISOString();
+            const inputTokens = Math.floor(totalTokens * 0.7);
+            const outputTokens = Math.floor(totalTokens * 0.3);
+            const sessionCount = state.snapshot.models.length;
+
+            const lastSubmission = getLastSubmission();
+            const previousChecksum = lastSubmission?.checksum || '0'.repeat(64);
+            const cumulativeChecksum = generateCumulativeChecksum(
+                { periodStart, periodEnd, inputTokens, outputTokens, sessionCount },
+                previousChecksum
+            );
+
             await ApiClient.submitUsage({
-                periodStart: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-                periodEnd: new Date().toISOString(),
-                inputTokens: Math.floor(totalTokens * 0.7),  // Estimate 70% input
-                outputTokens: Math.floor(totalTokens * 0.3), // Estimate 30% output
-                sessionCount: state.snapshot.models.length,
+                periodStart,
+                periodEnd,
+                inputTokens,
+                outputTokens,
+                sessionCount,
                 modelBreakdown: {},
-                cumulativeChecksum: '',
-                previousChecksum: '',
+                cumulativeChecksum,
+                previousChecksum,
                 clientVersion: VERSION,
             });
+
             state.lastSubmitTime = new Date();
+            storeLastSubmission(new Date().toISOString(), cumulativeChecksum);
         } catch {
             // Silently fail auto-submit
         }
@@ -272,20 +288,36 @@ async function performSubmit(state: DashboardState): Promise<void> {
         const totalOutput = state.snapshot.tokenUsage?.flowCredits?.monthly || 0;
         const usedOutput = totalOutput - (state.snapshot.tokenUsage?.flowCredits?.available || 0);
 
+        const periodStart = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const periodEnd = new Date().toISOString();
+        const sessionCount = state.snapshot.models.length;
+
+        // Get previous checksum from last submission
+        const lastSubmission = getLastSubmission();
+        const previousChecksum = lastSubmission?.checksum || '0'.repeat(64);
+
+        // Generate cumulative checksum
+        const cumulativeChecksum = generateCumulativeChecksum(
+            { periodStart, periodEnd, inputTokens: usedInput, outputTokens: usedOutput, sessionCount },
+            previousChecksum
+        );
+
         const result = await ApiClient.submitUsage({
-            periodStart: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-            periodEnd: new Date().toISOString(),
+            periodStart,
+            periodEnd,
             inputTokens: usedInput,
             outputTokens: usedOutput,
-            sessionCount: state.snapshot.models.length,
+            sessionCount,
             modelBreakdown: {},
-            cumulativeChecksum: '',
-            previousChecksum: '',
+            cumulativeChecksum,
+            previousChecksum,
             clientVersion: VERSION,
         });
 
         state.lastSubmitTime = new Date();
         if (result.success) {
+            // Store this submission for next time
+            storeLastSubmission(new Date().toISOString(), cumulativeChecksum);
             state.submitMessage = `✓ Submitted! Rank: #${result.rank || 'N/A'} | Trust: ${result.trustScore}/100`;
         } else {
             state.submitMessage = `⚠ ${result.message || 'Submission failed'}`;
@@ -435,8 +467,8 @@ function renderDashboard(state: DashboardState, options: DashboardOptions): void
                 : (model.remainingPercentage >= 80 ? chalk.green : model.remainingPercentage >= 40 ? chalk.yellow : chalk.red)(`${model.remainingPercentage.toFixed(0)}%`);
             const resetStr = model.timeUntilReset;
 
-            // Build row with fixed column widths
-            const row = `  ${modelName.padEnd(nameCol)}${barStr}  ${pctStr}  ${resetStr.padStart(8)}`;
+            // Build row with fixed column widths - use padEndAnsi for colored text
+            const row = `  ${modelName.padEnd(nameCol)}${barStr}  ${padEndAnsi(pctStr, pctCol)}  ${resetStr.padStart(8)}`;
             lines.push(pad + chalk.cyan('║') + padEndAnsi(row, width - 2) + chalk.cyan('║'));
         }
 
