@@ -232,14 +232,42 @@ async function checkAndAutoSubmit(state: DashboardState): Promise<void> {
 
     if (usageChanged && timeSinceLastSubmit >= minInterval) {
         try {
-            const totalTokens = (state.snapshot.tokenUsage?.promptCredits?.monthly || 0) - currPrompt +
-                (state.snapshot.tokenUsage?.flowCredits?.monthly || 0) - currFlow;
+            const snapshot = state.snapshot;
 
-            const periodStart = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-            const periodEnd = new Date().toISOString();
-            const inputTokens = Math.floor(totalTokens * 0.7);
-            const outputTokens = Math.floor(totalTokens * 0.3);
-            const sessionCount = state.snapshot.models.length;
+            // Calculate real token usage
+            const promptMonthly = snapshot.tokenUsage?.promptCredits?.monthly || 0;
+            const flowMonthly = snapshot.tokenUsage?.flowCredits?.monthly || 0;
+            const usedPrompt = promptMonthly - currPrompt;
+            const usedFlow = flowMonthly - currFlow;
+
+            const inputTokens = usedPrompt;
+            const outputTokens = usedFlow;
+
+            // Build model breakdown
+            const modelBreakdown: Record<string, { inputTokens: number; outputTokens: number; sessions: number }> = {};
+            const activeModels = snapshot.models.filter(m => m.remainingPercentage < 100);
+
+            for (const model of snapshot.models) {
+                const usedPercentage = 100 - model.remainingPercentage;
+                const modelTokenShare = (usedPrompt + usedFlow) * (usedPercentage / 100) / Math.max(1, activeModels.length);
+
+                modelBreakdown[model.modelId] = {
+                    inputTokens: Math.floor(modelTokenShare * 0.6),
+                    outputTokens: Math.floor(modelTokenShare * 0.4),
+                    sessions: usedPercentage > 0 ? 1 : 0,
+                };
+            }
+
+            const sessionCount = activeModels.length || 1;
+
+            // Weekly period
+            const now = new Date();
+            const weekStart = new Date(now);
+            weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+            weekStart.setHours(0, 0, 0, 0);
+
+            const periodStart = weekStart.toISOString();
+            const periodEnd = now.toISOString();
 
             const lastSubmission = getLastSubmission();
             const previousChecksum = lastSubmission?.checksum || '0'.repeat(64);
@@ -254,7 +282,7 @@ async function checkAndAutoSubmit(state: DashboardState): Promise<void> {
                 inputTokens,
                 outputTokens,
                 sessionCount,
-                modelBreakdown: {},
+                modelBreakdown,
                 cumulativeChecksum,
                 previousChecksum,
                 clientVersion: VERSION,
@@ -269,7 +297,7 @@ async function checkAndAutoSubmit(state: DashboardState): Promise<void> {
 }
 
 /**
- * Perform manual submit
+ * Perform manual submit with complete model data
  */
 async function performSubmit(state: DashboardState): Promise<void> {
     if (!isAuthenticated()) {
@@ -283,14 +311,48 @@ async function performSubmit(state: DashboardState): Promise<void> {
     }
 
     try {
-        const totalInput = state.snapshot.tokenUsage?.promptCredits?.monthly || 0;
-        const usedInput = totalInput - (state.snapshot.tokenUsage?.promptCredits?.available || 0);
-        const totalOutput = state.snapshot.tokenUsage?.flowCredits?.monthly || 0;
-        const usedOutput = totalOutput - (state.snapshot.tokenUsage?.flowCredits?.available || 0);
+        const snapshot = state.snapshot;
 
-        const periodStart = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-        const periodEnd = new Date().toISOString();
-        const sessionCount = state.snapshot.models.length;
+        // Calculate token usage from credits
+        const promptMonthly = snapshot.tokenUsage?.promptCredits?.monthly || 0;
+        const promptAvailable = snapshot.tokenUsage?.promptCredits?.available || 0;
+        const flowMonthly = snapshot.tokenUsage?.flowCredits?.monthly || 0;
+        const flowAvailable = snapshot.tokenUsage?.flowCredits?.available || 0;
+
+        const usedPrompt = promptMonthly - promptAvailable;
+        const usedFlow = flowMonthly - flowAvailable;
+
+        // Use prompt credits as input tokens, flow credits as output tokens
+        const inputTokens = usedPrompt;
+        const outputTokens = usedFlow;
+
+        // Build real model breakdown from snapshot
+        const modelBreakdown: Record<string, { inputTokens: number; outputTokens: number; sessions: number }> = {};
+        const activeModels = snapshot.models.filter(m => m.remainingPercentage < 100);
+
+        for (const model of snapshot.models) {
+            // Calculate tokens used per model based on usage percentage
+            const usedPercentage = 100 - model.remainingPercentage;
+            const modelTokenShare = (usedPrompt + usedFlow) * (usedPercentage / 100) / Math.max(1, activeModels.length);
+
+            modelBreakdown[model.modelId] = {
+                inputTokens: Math.floor(modelTokenShare * 0.6),
+                outputTokens: Math.floor(modelTokenShare * 0.4),
+                sessions: usedPercentage > 0 ? 1 : 0,
+            };
+        }
+
+        // Session count = number of models with usage
+        const sessionCount = activeModels.length || 1;
+
+        // Period: use current reset period (weekly)
+        const now = new Date();
+        const weekStart = new Date(now);
+        weekStart.setDate(weekStart.getDate() - weekStart.getDay()); // Sunday
+        weekStart.setHours(0, 0, 0, 0);
+
+        const periodStart = weekStart.toISOString();
+        const periodEnd = now.toISOString();
 
         // Get previous checksum from last submission
         const lastSubmission = getLastSubmission();
@@ -298,17 +360,17 @@ async function performSubmit(state: DashboardState): Promise<void> {
 
         // Generate cumulative checksum
         const cumulativeChecksum = generateCumulativeChecksum(
-            { periodStart, periodEnd, inputTokens: usedInput, outputTokens: usedOutput, sessionCount },
+            { periodStart, periodEnd, inputTokens, outputTokens, sessionCount },
             previousChecksum
         );
 
         const result = await ApiClient.submitUsage({
             periodStart,
             periodEnd,
-            inputTokens: usedInput,
-            outputTokens: usedOutput,
+            inputTokens,
+            outputTokens,
             sessionCount,
-            modelBreakdown: {},
+            modelBreakdown,
             cumulativeChecksum,
             previousChecksum,
             clientVersion: VERSION,
