@@ -25,7 +25,7 @@ const config = new Conf<ConfigSchema>({
     projectName: 'agy-top',
     defaults: {
         auth: {},
-        apiUrl: process.env.AGY_API_URL || 'https://zero.paean.ai',
+        apiUrl: process.env.AGY_API_URL || 'https://api.paean.ai',
         webUrl: process.env.AGY_WEB_URL || 'https://app.paean.ai',
         installationId: generateInstallationId(),
     },
