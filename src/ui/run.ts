@@ -19,14 +19,17 @@ type ViewMode = 'dashboard' | 'leaderboard' | 'submit' | 'help';
 interface DashboardState {
     server: ServerInfo | null;
     snapshot: QuotaSnapshot | null;
+    previousSnapshot: QuotaSnapshot | null;
     weeklyTrend: WeeklyTrend[];
     uptime: number;
     lastRefresh: Date;
+    lastSubmitTime: Date | null;
     isLoading: boolean;
     error: string | null;
     currentView: ViewMode;
     leaderboardData: LeaderboardData | null;
     submitMessage: string | null;
+    autoSubmitEnabled: boolean;
 }
 
 /**
@@ -42,14 +45,17 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
     let state: DashboardState = {
         server: null,
         snapshot: null,
+        previousSnapshot: null,
         weeklyTrend: generateMockWeeklyTrend(),
         uptime: 0,
         lastRefresh: new Date(),
+        lastSubmitTime: null,
         isLoading: true,
         error: null,
         currentView: 'dashboard',
         leaderboardData: null,
         submitMessage: null,
+        autoSubmitEnabled: true,  // Enable auto-submit by default
     };
 
     // Initial server detection
@@ -71,7 +77,7 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
     console.log(chalk.dim('  Starting dashboard...\n'));
 
     // Initial data load
-    await refreshData(state);
+    await refreshData(state, options);
     state.isLoading = false;
 
     // Handle terminal resize
@@ -125,7 +131,7 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
             if (key === 'r') {
                 state.isLoading = true;
                 render(state, options);
-                await refreshData(state);
+                await refreshData(state, options);
                 state.isLoading = false;
                 render(state, options);
             }
@@ -143,7 +149,9 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
             }
             if (key === 's' && options.rankMode) {
                 state.currentView = 'submit';
-                state.submitMessage = 'Submission feature coming soon...';
+                state.submitMessage = 'Submitting usage data...';
+                render(state, options);
+                await performSubmit(state);
                 render(state, options);
             }
             if (key === '?') {
@@ -156,11 +164,15 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
     // Auto-refresh loop
     const refreshLoop = async () => {
         state.uptime = Math.floor((Date.now() - startTime) / 1000);
-        render(state, options);
+
+        // Only render if in dashboard view
+        if (state.currentView === 'dashboard') {
+            render(state, options);
+        }
 
         if (options.autoRefresh) {
             setTimeout(async () => {
-                await refreshData(state);
+                await refreshData(state, options);
                 refreshLoop();
             }, options.refreshInterval);
         }
@@ -170,22 +182,116 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
 }
 
 /**
- * Refresh data from Language Server
+ * Refresh data from Language Server and auto-submit if usage changed
  */
-async function refreshData(state: DashboardState): Promise<void> {
+async function refreshData(state: DashboardState, options: DashboardOptions): Promise<void> {
     if (!state.server) return;
 
     try {
         const result = await fetchQuota(state.server);
         if (result.success && result.snapshot) {
+            // Store previous snapshot for comparison
+            state.previousSnapshot = state.snapshot;
             state.snapshot = result.snapshot;
             state.error = null;
+
+            // Auto-submit if usage changed and authenticated
+            if (state.autoSubmitEnabled && options.rankMode && isAuthenticated()) {
+                await checkAndAutoSubmit(state);
+            }
         } else {
             state.error = result.error || 'Failed to fetch quota';
         }
         state.lastRefresh = new Date();
     } catch (error) {
         state.error = error instanceof Error ? error.message : 'Refresh failed';
+    }
+}
+
+/**
+ * Check if usage changed and auto-submit
+ */
+async function checkAndAutoSubmit(state: DashboardState): Promise<void> {
+    if (!state.snapshot || !state.previousSnapshot) return;
+
+    // Compare token usage
+    const prevPrompt = state.previousSnapshot.tokenUsage?.promptCredits?.available || 0;
+    const currPrompt = state.snapshot.tokenUsage?.promptCredits?.available || 0;
+    const prevFlow = state.previousSnapshot.tokenUsage?.flowCredits?.available || 0;
+    const currFlow = state.snapshot.tokenUsage?.flowCredits?.available || 0;
+
+    // Check if credits decreased (meaning tokens were used)
+    const usageChanged = currPrompt < prevPrompt || currFlow < prevFlow;
+
+    // Rate limit: don't submit more than once per 5 minutes
+    const minInterval = 5 * 60 * 1000;
+    const timeSinceLastSubmit = state.lastSubmitTime
+        ? Date.now() - state.lastSubmitTime.getTime()
+        : Infinity;
+
+    if (usageChanged && timeSinceLastSubmit >= minInterval) {
+        try {
+            const totalTokens = (state.snapshot.tokenUsage?.promptCredits?.monthly || 0) - currPrompt +
+                (state.snapshot.tokenUsage?.flowCredits?.monthly || 0) - currFlow;
+
+            await ApiClient.submitUsage({
+                periodStart: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+                periodEnd: new Date().toISOString(),
+                inputTokens: Math.floor(totalTokens * 0.7),  // Estimate 70% input
+                outputTokens: Math.floor(totalTokens * 0.3), // Estimate 30% output
+                sessionCount: state.snapshot.models.length,
+                modelBreakdown: {},
+                cumulativeChecksum: '',
+                previousChecksum: '',
+                clientVersion: VERSION,
+            });
+            state.lastSubmitTime = new Date();
+        } catch {
+            // Silently fail auto-submit
+        }
+    }
+}
+
+/**
+ * Perform manual submit
+ */
+async function performSubmit(state: DashboardState): Promise<void> {
+    if (!isAuthenticated()) {
+        state.submitMessage = '⚠ Please login first: agy-top login';
+        return;
+    }
+
+    if (!state.snapshot) {
+        state.submitMessage = '⚠ No usage data available';
+        return;
+    }
+
+    try {
+        const totalInput = state.snapshot.tokenUsage?.promptCredits?.monthly || 0;
+        const usedInput = totalInput - (state.snapshot.tokenUsage?.promptCredits?.available || 0);
+        const totalOutput = state.snapshot.tokenUsage?.flowCredits?.monthly || 0;
+        const usedOutput = totalOutput - (state.snapshot.tokenUsage?.flowCredits?.available || 0);
+
+        const result = await ApiClient.submitUsage({
+            periodStart: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+            periodEnd: new Date().toISOString(),
+            inputTokens: usedInput,
+            outputTokens: usedOutput,
+            sessionCount: state.snapshot.models.length,
+            modelBreakdown: {},
+            cumulativeChecksum: '',
+            previousChecksum: '',
+            clientVersion: VERSION,
+        });
+
+        state.lastSubmitTime = new Date();
+        if (result.success) {
+            state.submitMessage = `✓ Submitted! Rank: #${result.rank || 'N/A'} | Trust: ${result.trustScore}/100`;
+        } else {
+            state.submitMessage = `⚠ ${result.message || 'Submission failed'}`;
+        }
+    } catch (error) {
+        state.submitMessage = `✗ Error: ${error instanceof Error ? error.message : 'Submit failed'}`;
     }
 }
 
