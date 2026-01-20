@@ -37,7 +37,7 @@ export interface LeaderboardEntry {
 }
 
 export interface LeaderboardData {
-    period: 'daily' | 'weekly' | 'monthly' | 'all_time';
+    period: 'daily' | 'weekly' | 'monthly' | 'yearly' | 'all_time';
     periodDate: string;
     entries: LeaderboardEntry[];
     userRank?: number;
