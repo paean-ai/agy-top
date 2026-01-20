@@ -36,7 +36,7 @@ ASCII-styled usage statistics for Antigravity with community leaderboard.
 npm install -g agy-top
 
 # Using bun
-bun install -g agy-top
+bun add -g agy-top
 
 # Or run directly with npx
 npx agy-top

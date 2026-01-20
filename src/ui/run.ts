@@ -9,11 +9,12 @@ import { detectAntigravityServer, type ServerInfo } from '../data/server-detecto
 import { fetchQuota, type QuotaSnapshot } from '../data/quota-service.js';
 import { isAuthenticated } from '../utils/config.js';
 import { formatTokens, progressBar, miniBar } from '../utils/output.js';
-import { showRank } from '../commands/rank.js';
-import { submitUsage } from '../commands/submit.js';
-import type { DashboardOptions, WeeklyTrend } from '../types/index.js';
+import { ApiClient } from '../api/client.js';
+import type { DashboardOptions, WeeklyTrend, LeaderboardData } from '../types/index.js';
 
 const VERSION = '0.1.0';
+
+type ViewMode = 'dashboard' | 'leaderboard' | 'submit' | 'help';
 
 interface DashboardState {
     server: ServerInfo | null;
@@ -23,6 +24,9 @@ interface DashboardState {
     lastRefresh: Date;
     isLoading: boolean;
     error: string | null;
+    currentView: ViewMode;
+    leaderboardData: LeaderboardData | null;
+    submitMessage: string | null;
 }
 
 /**
@@ -43,6 +47,9 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
         lastRefresh: new Date(),
         isLoading: true,
         error: null,
+        currentView: 'dashboard',
+        leaderboardData: null,
+        submitMessage: null,
     };
 
     // Initial server detection
@@ -90,7 +97,28 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
         process.stdin.resume();
         process.stdin.setEncoding('utf8');
 
+        // State to track current view
+        let currentView: 'dashboard' | 'leaderboard' | 'submit' | 'help' = 'dashboard';
+
+        // Helper to clear screen properly
+        const clearScreen = () => {
+            logUpdate.clear();
+            logUpdate.done();
+            process.stdout.write('\x1B[2J\x1B[0;0H'); // Clear screen and move cursor to top
+        };
+
         process.stdin.on('data', async (key: string) => {
+            // Handle based on current view
+            if (state.currentView !== 'dashboard') {
+                // Any key returns to dashboard from other views
+                state.currentView = 'dashboard';
+                state.leaderboardData = null;
+                state.submitMessage = null;
+                render(state, options);
+                return;
+            }
+
+            // Dashboard view key handlers
             if (key === 'q' || key === '\u0003') { // q or Ctrl+C
                 cleanup();
             }
@@ -102,33 +130,25 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
                 render(state, options);
             }
             if (key === 'l' && options.rankMode) {
-                // Show leaderboard
-                logUpdate.clear();
-                process.stdout.write('\x1B[?25h'); // Show cursor
-                console.clear();
-                await showRank({ period: 'weekly', limit: 20 });
-                console.log(chalk.dim('\nPress any key to return to dashboard...'));
-                process.stdin.once('data', () => {
-                    process.stdout.write('\x1B[?25l'); // Hide cursor
-                    console.clear();
-                    render(state, options);
-                });
+                state.currentView = 'leaderboard';
+                state.isLoading = true;
+                render(state, options);
+                try {
+                    state.leaderboardData = await ApiClient.getLeaderboard({ period: 'weekly', limit: 20 });
+                } catch (error) {
+                    state.error = error instanceof Error ? error.message : 'Failed to fetch leaderboard';
+                }
+                state.isLoading = false;
+                render(state, options);
             }
             if (key === 's' && options.rankMode) {
-                // Submit usage data
-                logUpdate.clear();
-                process.stdout.write('\x1B[?25h'); // Show cursor
-                console.clear();
-                await submitUsage();
-                console.log(chalk.dim('\nPress any key to return to dashboard...'));
-                process.stdin.once('data', () => {
-                    process.stdout.write('\x1B[?25l'); // Hide cursor
-                    console.clear();
-                    render(state, options);
-                });
+                state.currentView = 'submit';
+                state.submitMessage = 'Submission feature coming soon...';
+                render(state, options);
             }
             if (key === '?') {
-                showHelp();
+                state.currentView = 'help';
+                render(state, options);
             }
         });
     }
@@ -173,6 +193,26 @@ async function refreshData(state: DashboardState): Promise<void> {
  * Render the full-screen dashboard
  */
 function render(state: DashboardState, options: DashboardOptions): void {
+    // Route to appropriate view renderer
+    switch (state.currentView) {
+        case 'leaderboard':
+            renderLeaderboard(state, options);
+            break;
+        case 'help':
+            renderHelp(state, options);
+            break;
+        case 'submit':
+            renderSubmit(state, options);
+            break;
+        default:
+            renderDashboard(state, options);
+    }
+}
+
+/**
+ * Render main dashboard view
+ */
+function renderDashboard(state: DashboardState, options: DashboardOptions): void {
     const { snapshot, weeklyTrend, uptime, lastRefresh, isLoading, error } = state;
 
     // Use full terminal width/height
@@ -338,12 +378,38 @@ function stripAnsi(str: string): string {
 }
 
 /**
- * Pad string to width, accounting for ANSI codes
+ * Get display width accounting for CJK characters (2 columns) and emojis
+ */
+function getDisplayWidth(str: string): number {
+    const clean = stripAnsi(str);
+    let width = 0;
+    for (const char of clean) {
+        const code = char.codePointAt(0) || 0;
+        // CJK Unified Ideographs, CJK Symbols, Hiragana, Katakana, Fullwidth chars
+        if (
+            (code >= 0x4E00 && code <= 0x9FFF) ||  // CJK Unified Ideographs
+            (code >= 0x3000 && code <= 0x303F) ||  // CJK Symbols and Punctuation
+            (code >= 0x3040 && code <= 0x309F) ||  // Hiragana
+            (code >= 0x30A0 && code <= 0x30FF) ||  // Katakana
+            (code >= 0xFF00 && code <= 0xFFEF) ||  // Fullwidth Forms
+            (code >= 0x1F300 && code <= 0x1F9FF) || // Emojis
+            (code >= 0x2600 && code <= 0x26FF)     // Misc symbols
+        ) {
+            width += 2;
+        } else {
+            width += 1;
+        }
+    }
+    return width;
+}
+
+/**
+ * Pad string to width, accounting for ANSI codes and CJK characters
  */
 function padEndAnsi(str: string, width: number): string {
-    const visibleLen = stripAnsi(str).length;
-    if (visibleLen >= width) return str;
-    return str + ' '.repeat(width - visibleLen);
+    const visibleWidth = getDisplayWidth(str);
+    if (visibleWidth >= width) return str;
+    return str + ' '.repeat(width - visibleWidth);
 }
 
 /**
@@ -385,12 +451,13 @@ Press any key to continue...
 }
 
 /**
- * Center text within a width
+ * Center text within a width, accounting for CJK characters
  */
 function centerText(text: string, width: number): string {
-    const textLen = stripAnsi(text).length;
-    const padding = Math.max(0, Math.floor((width - textLen) / 2));
-    return ' '.repeat(padding) + text + ' '.repeat(width - padding - textLen);
+    const textWidth = getDisplayWidth(text);
+    const padding = Math.max(0, Math.floor((width - textWidth) / 2));
+    const rightPadding = Math.max(0, width - padding - textWidth);
+    return ' '.repeat(padding) + text + ' '.repeat(rightPadding);
 }
 
 /**
@@ -431,3 +498,108 @@ function generateMockWeeklyTrend(): WeeklyTrend[] {
         percentage: Math.random() * 100,
     }));
 }
+
+/**
+ * Render leaderboard view with same styling as dashboard
+ */
+function renderLeaderboard(state: DashboardState, options: DashboardOptions): void {
+    const termWidth = process.stdout.columns || 80;
+    const width = Math.min(termWidth, 100);
+    const leftPad = Math.max(0, Math.floor((termWidth - width) / 2));
+    const pad = ' '.repeat(leftPad);
+
+    const lines: string[] = [];
+
+    // Header
+    lines.push(pad + chalk.cyan('╔' + '═'.repeat(width - 2) + '╗'));
+    lines.push(pad + chalk.cyan('║') + centerText(chalk.bold('🏆 agy-top Leaderboard'), width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + centerText(chalk.dim('Weekly Rankings'), width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('╠' + '═'.repeat(width - 2) + '╣'));
+
+    if (state.isLoading) {
+        lines.push(pad + chalk.cyan('║') + centerText(chalk.yellow('Loading leaderboard...'), width - 2) + chalk.cyan('║'));
+    } else if (state.error) {
+        lines.push(pad + chalk.cyan('║') + padEndAnsi(chalk.red(`  ⚠ ${state.error}`), width - 2) + chalk.cyan('║'));
+    } else if (!state.leaderboardData || state.leaderboardData.entries.length === 0) {
+        lines.push(pad + chalk.cyan('║') + ' '.repeat(width - 2) + chalk.cyan('║'));
+        lines.push(pad + chalk.cyan('║') + centerText(chalk.dim('No entries yet. Be the first to submit!'), width - 2) + chalk.cyan('║'));
+        lines.push(pad + chalk.cyan('║') + ' '.repeat(width - 2) + chalk.cyan('║'));
+    } else {
+        // Table header
+        const header = `  ${'RANK'.padEnd(8)}${'USER'.padEnd(25)}${'TOKENS'.padEnd(15)}${'TIER'.padEnd(10)}`;
+        lines.push(pad + chalk.cyan('║') + padEndAnsi(chalk.dim(header), width - 2) + chalk.cyan('║'));
+        lines.push(pad + chalk.cyan('╟' + '─'.repeat(width - 2) + '╢'));
+
+        // Entries
+        for (const entry of state.leaderboardData.entries.slice(0, 15)) {
+            const rankIcon = entry.rank === 1 ? '🥇' : entry.rank === 2 ? '🥈' : entry.rank === 3 ? '🥉' : '  ';
+            const rankStr = `${rankIcon}${entry.rank}`.padEnd(8);
+            const userStr = (entry.isCurrentUser ? chalk.cyan(entry.displayName) : entry.displayName).toString().slice(0, 22).padEnd(25);
+            const tokensStr = formatTokens(entry.totalTokens).padEnd(15);
+            const tierStr = entry.tier.padEnd(10);
+            const row = `  ${rankStr}${userStr}${tokensStr}${tierStr}`;
+            lines.push(pad + chalk.cyan('║') + padEndAnsi(row, width - 2) + chalk.cyan('║'));
+        }
+    }
+
+    lines.push(pad + chalk.cyan('║') + ' '.repeat(width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('╟' + '─'.repeat(width - 2) + '╢'));
+    lines.push(pad + chalk.cyan('║') + centerText(chalk.dim('Press any key to return to dashboard...'), width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('╚' + '═'.repeat(width - 2) + '╝'));
+
+    logUpdate(lines.join('\n'));
+}
+
+/**
+ * Render help view with same styling
+ */
+function renderHelp(state: DashboardState, options: DashboardOptions): void {
+    const termWidth = process.stdout.columns || 80;
+    const width = Math.min(termWidth, 80);
+    const leftPad = Math.max(0, Math.floor((termWidth - width) / 2));
+    const pad = ' '.repeat(leftPad);
+
+    const lines: string[] = [];
+
+    lines.push(pad + chalk.cyan('╔' + '═'.repeat(width - 2) + '╗'));
+    lines.push(pad + chalk.cyan('║') + centerText(chalk.bold('? agy-top Help'), width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('╠' + '═'.repeat(width - 2) + '╣'));
+    lines.push(pad + chalk.cyan('║') + ' '.repeat(width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + padEndAnsi(chalk.dim('  KEYBOARD SHORTCUTS'), width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + padEndAnsi(`  ${chalk.cyan('q')}     Quit`, width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + padEndAnsi(`  ${chalk.cyan('r')}     Refresh data`, width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + padEndAnsi(`  ${chalk.cyan('l')}     Show leaderboard`, width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + padEndAnsi(`  ${chalk.cyan('s')}     Submit usage data`, width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + padEndAnsi(`  ${chalk.cyan('?')}     Show this help`, width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + ' '.repeat(width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('╟' + '─'.repeat(width - 2) + '╢'));
+    lines.push(pad + chalk.cyan('║') + centerText(chalk.dim('Press any key to return to dashboard...'), width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('╚' + '═'.repeat(width - 2) + '╝'));
+
+    logUpdate(lines.join('\n'));
+}
+
+/**
+ * Render submit view with same styling
+ */
+function renderSubmit(state: DashboardState, options: DashboardOptions): void {
+    const termWidth = process.stdout.columns || 80;
+    const width = Math.min(termWidth, 80);
+    const leftPad = Math.max(0, Math.floor((termWidth - width) / 2));
+    const pad = ' '.repeat(leftPad);
+
+    const lines: string[] = [];
+
+    lines.push(pad + chalk.cyan('╔' + '═'.repeat(width - 2) + '╗'));
+    lines.push(pad + chalk.cyan('║') + centerText(chalk.bold('📤 Submit Usage Data'), width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('╠' + '═'.repeat(width - 2) + '╣'));
+    lines.push(pad + chalk.cyan('║') + ' '.repeat(width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + centerText(chalk.yellow(state.submitMessage || 'Processing...'), width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + ' '.repeat(width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('╟' + '─'.repeat(width - 2) + '╢'));
+    lines.push(pad + chalk.cyan('║') + centerText(chalk.dim('Press any key to return to dashboard...'), width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('╚' + '═'.repeat(width - 2) + '╝'));
+
+    logUpdate(lines.join('\n'));
+}
+
