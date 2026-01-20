@@ -311,21 +311,65 @@ async function fetchTokenUsageStats(state: DashboardState): Promise<void> {
     try {
         // Fetch daily usage
         const dailyResult = await ApiClient.getMyUsage({ period: 'daily', limit: 1 });
-        const dailyTokens = dailyResult.records.length > 0
-            ? (dailyResult.records[0].inputTokens || 0) + (dailyResult.records[0].outputTokens || 0)
-            : 0;
+        let dailyTokens = 0;
+        if (dailyResult.records.length > 0) {
+            const record = dailyResult.records[0];
+            // API returns strings, so we need to convert to numbers
+            // Prefer totalTokens if available, otherwise sum inputTokens and outputTokens
+            if (record.totalTokens !== undefined && record.totalTokens !== null) {
+                dailyTokens = Number(record.totalTokens) || 0;
+            } else {
+                // Fallback to sum of inputTokens and outputTokens (convert strings to numbers)
+                const input = Number(record.inputTokens || 0) || 0;
+                const output = Number(record.outputTokens || 0) || 0;
+                dailyTokens = input + output;
+            }
+        }
 
         // Fetch weekly usage
         const weeklyResult = await ApiClient.getMyUsage({ period: 'weekly', limit: 1 });
-        const weeklyTokens = weeklyResult.records.length > 0
-            ? (weeklyResult.records[0].inputTokens || 0) + (weeklyResult.records[0].outputTokens || 0)
-            : 0;
+        let weeklyTokens = 0;
+        if (weeklyResult.records.length > 0) {
+            const record = weeklyResult.records[0];
+            if (record.totalTokens !== undefined && record.totalTokens !== null) {
+                weeklyTokens = Number(record.totalTokens) || 0;
+            } else {
+                const input = Number(record.inputTokens || 0) || 0;
+                const output = Number(record.outputTokens || 0) || 0;
+                weeklyTokens = input + output;
+            }
+        }
 
         // Fetch monthly usage
         const monthlyResult = await ApiClient.getMyUsage({ period: 'monthly', limit: 1 });
-        const monthlyTokens = monthlyResult.records.length > 0
-            ? (monthlyResult.records[0].inputTokens || 0) + (monthlyResult.records[0].outputTokens || 0)
-            : 0;
+        let monthlyTokens = 0;
+        if (monthlyResult.records.length > 0) {
+            const record = monthlyResult.records[0];
+            if (record.totalTokens !== undefined && record.totalTokens !== null) {
+                monthlyTokens = Number(record.totalTokens) || 0;
+            } else {
+                const input = Number(record.inputTokens || 0) || 0;
+                const output = Number(record.outputTokens || 0) || 0;
+                monthlyTokens = input + output;
+            }
+        }
+
+        // Validate token values - if they seem unreasonably large (> 1 billion), 
+        // they might be credits instead of tokens, or there's a data issue
+        // Typical usage: millions to tens of millions of tokens per month
+        const MAX_REASONABLE_TOKENS = 1_000_000_000; // 1 billion tokens
+        
+        if (dailyTokens > MAX_REASONABLE_TOKENS || 
+            weeklyTokens > MAX_REASONABLE_TOKENS || 
+            monthlyTokens > MAX_REASONABLE_TOKENS) {
+            // Data seems invalid, fall back to snapshot-based calculation
+            throw new Error('Token values exceed reasonable limits, using snapshot data instead');
+        }
+
+        // If all three values are identical and very large, likely a data issue
+        if (dailyTokens === weeklyTokens && weeklyTokens === monthlyTokens && dailyTokens > 10_000_000) {
+            throw new Error('All periods show identical values, likely data issue, using snapshot data instead');
+        }
 
         state.tokenUsageStats = {
             daily: dailyTokens,
@@ -333,7 +377,7 @@ async function fetchTokenUsageStats(state: DashboardState): Promise<void> {
             monthly: monthlyTokens,
         };
     } catch (error) {
-        // If API fails, try to calculate from snapshot if available
+        // If API fails or data is invalid, try to calculate from snapshot if available
         if (state.snapshot?.tokenUsage) {
             const tu = state.snapshot.tokenUsage;
             const promptUsed = (tu.promptCredits?.monthly || 0) - (tu.promptCredits?.available || 0);
@@ -351,6 +395,9 @@ async function fetchTokenUsageStats(state: DashboardState): Promise<void> {
                 weekly: Math.floor((totalUsed / daysInMonth) * dayOfWeek),
                 monthly: totalUsed,
             };
+        } else {
+            // No snapshot data available, set to null to hide the section
+            state.tokenUsageStats = null;
         }
     }
 }
@@ -383,7 +430,15 @@ async function fetchWeeklyTrend(state: DashboardState): Promise<void> {
                     const recordDate = new Date(record.periodStart);
                     recordDate.setHours(0, 0, 0, 0);
                     const dateStr = recordDate.toISOString().split('T')[0];
-                    const tokens = (record.inputTokens || 0) + (record.outputTokens || 0);
+                    // Convert strings to numbers to avoid string concatenation
+                    let tokens = 0;
+                    if (record.totalTokens !== undefined && record.totalTokens !== null) {
+                        tokens = Number(record.totalTokens) || 0;
+                    } else {
+                        const input = Number(record.inputTokens || 0) || 0;
+                        const output = Number(record.outputTokens || 0) || 0;
+                        tokens = input + output;
+                    }
                     const existing = dailyUsageMap.get(dateStr) || 0;
                     dailyUsageMap.set(dateStr, existing + tokens);
                 }
@@ -705,6 +760,7 @@ function renderDashboard(state: DashboardState, options: DashboardOptions): void
         const weeklyLabel = chalk.dim('This Week:');
         const monthlyLabel = chalk.dim('This Month:');
 
+        // Format values, ensuring they're reasonable numbers
         const dailyValue = chalk.bold.cyan(formatTokens(tokenUsageStats.daily));
         const weeklyValue = chalk.bold.yellow(formatTokens(tokenUsageStats.weekly));
         const monthlyValue = chalk.bold.magenta(formatTokens(tokenUsageStats.monthly));
