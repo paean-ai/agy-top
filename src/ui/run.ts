@@ -20,6 +20,12 @@ type ViewMode = 'dashboard' | 'leaderboard' | 'submit' | 'help';
 
 type LeaderboardPeriod = 'daily' | 'weekly' | 'monthly' | 'yearly' | 'all_time';
 
+interface TokenUsageStats {
+    daily: number;
+    weekly: number;
+    monthly: number;
+}
+
 interface DashboardState {
     server: ServerInfo | null;
     snapshot: QuotaSnapshot | null;
@@ -35,6 +41,7 @@ interface DashboardState {
     submitMessage: string | null;
     autoSubmitEnabled: boolean;
     leaderboardPeriod: LeaderboardPeriod;
+    tokenUsageStats: TokenUsageStats | null;
 }
 
 /**
@@ -65,6 +72,7 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
         submitMessage: null,
         autoSubmitEnabled: true,  // Enable auto-submit by default
         leaderboardPeriod: 'weekly',
+        tokenUsageStats: null,
     };
 
     // Initial server detection
@@ -277,8 +285,137 @@ async function refreshData(state: DashboardState, options: DashboardOptions): Pr
             state.error = result.error || 'Failed to fetch quota';
         }
         state.lastRefresh = new Date();
+
+        // Fetch token usage statistics (daily/weekly/monthly)
+        // Try to fetch from API if authenticated, otherwise estimate from snapshot
+        try {
+            if (isAuthenticated()) {
+                await fetchTokenUsageStats(state);
+                await fetchWeeklyTrend(state);
+            } else if (state.snapshot?.tokenUsage) {
+                // Estimate from snapshot for unauthenticated users
+                await fetchTokenUsageStats(state);
+            }
+        } catch (error) {
+            // Silently fail - token stats are optional
+        }
     } catch (error) {
         state.error = error instanceof Error ? error.message : 'Refresh failed';
+    }
+}
+
+/**
+ * Fetch token usage statistics for daily/weekly/monthly periods
+ */
+async function fetchTokenUsageStats(state: DashboardState): Promise<void> {
+    try {
+        // Fetch daily usage
+        const dailyResult = await ApiClient.getMyUsage({ period: 'daily', limit: 1 });
+        const dailyTokens = dailyResult.records.length > 0
+            ? (dailyResult.records[0].inputTokens || 0) + (dailyResult.records[0].outputTokens || 0)
+            : 0;
+
+        // Fetch weekly usage
+        const weeklyResult = await ApiClient.getMyUsage({ period: 'weekly', limit: 1 });
+        const weeklyTokens = weeklyResult.records.length > 0
+            ? (weeklyResult.records[0].inputTokens || 0) + (weeklyResult.records[0].outputTokens || 0)
+            : 0;
+
+        // Fetch monthly usage
+        const monthlyResult = await ApiClient.getMyUsage({ period: 'monthly', limit: 1 });
+        const monthlyTokens = monthlyResult.records.length > 0
+            ? (monthlyResult.records[0].inputTokens || 0) + (monthlyResult.records[0].outputTokens || 0)
+            : 0;
+
+        state.tokenUsageStats = {
+            daily: dailyTokens,
+            weekly: weeklyTokens,
+            monthly: monthlyTokens,
+        };
+    } catch (error) {
+        // If API fails, try to calculate from snapshot if available
+        if (state.snapshot?.tokenUsage) {
+            const tu = state.snapshot.tokenUsage;
+            const promptUsed = (tu.promptCredits?.monthly || 0) - (tu.promptCredits?.available || 0);
+            const flowUsed = (tu.flowCredits?.monthly || 0) - (tu.flowCredits?.available || 0);
+            const totalUsed = promptUsed + flowUsed;
+
+            // Estimate daily/weekly from monthly (rough approximation)
+            const now = new Date();
+            const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+            const dayOfMonth = now.getDate();
+            const dayOfWeek = now.getDay() || 7; // 1-7 (Mon-Sun)
+
+            state.tokenUsageStats = {
+                daily: Math.floor((totalUsed / dayOfMonth) * 1.2), // Slight overestimate for today
+                weekly: Math.floor((totalUsed / daysInMonth) * dayOfWeek),
+                monthly: totalUsed,
+            };
+        }
+    }
+}
+
+/**
+ * Fetch weekly trend data from API
+ */
+async function fetchWeeklyTrend(state: DashboardState): Promise<void> {
+    try {
+        // Fetch weekly usage records (last 7 days)
+        const weeklyResult = await ApiClient.getMyUsage({ period: 'weekly', limit: 30 });
+        
+        if (weeklyResult.records && weeklyResult.records.length > 0) {
+            // Group records by day
+            const dailyUsageMap = new Map<string, number>();
+            const now = new Date();
+            
+            // Initialize all 7 days with 0
+            for (let i = 6; i >= 0; i--) {
+                const date = new Date(now);
+                date.setDate(date.getDate() - i);
+                date.setHours(0, 0, 0, 0);
+                const dateStr = date.toISOString().split('T')[0];
+                dailyUsageMap.set(dateStr, 0);
+            }
+            
+            // Fill in actual usage data from records
+            for (const record of weeklyResult.records as any[]) {
+                if (record.periodStart) {
+                    const recordDate = new Date(record.periodStart);
+                    recordDate.setHours(0, 0, 0, 0);
+                    const dateStr = recordDate.toISOString().split('T')[0];
+                    const tokens = (record.inputTokens || 0) + (record.outputTokens || 0);
+                    const existing = dailyUsageMap.get(dateStr) || 0;
+                    dailyUsageMap.set(dateStr, existing + tokens);
+                }
+            }
+            
+            // Convert to WeeklyTrend format
+            const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+            const trendData: WeeklyTrend[] = [];
+            const usageValues = Array.from(dailyUsageMap.values());
+            const maxTokens = Math.max(...usageValues, 1);
+            
+            for (let i = 6; i >= 0; i--) {
+                const date = new Date(now);
+                date.setDate(date.getDate() - i);
+                date.setHours(0, 0, 0, 0);
+                const dateStr = date.toISOString().split('T')[0];
+                const tokens = dailyUsageMap.get(dateStr) || 0;
+                const dayOfWeek = (date.getDay() + 6) % 7; // Convert to Mon-Sun (0-6)
+                
+                trendData.push({
+                    day: days[dayOfWeek],
+                    date: dateStr,
+                    inputTokens: 0, // Not available from aggregated API
+                    outputTokens: 0, // Not available from aggregated API
+                    percentage: maxTokens > 0 ? (tokens / maxTokens) * 100 : 0,
+                });
+            }
+            
+            state.weeklyTrend = trendData;
+        }
+    } catch (error) {
+        // Keep existing trend data if fetch fails
     }
 }
 
@@ -496,7 +633,7 @@ function render(state: DashboardState, options: DashboardOptions): void {
  * Render main dashboard view
  */
 function renderDashboard(state: DashboardState, options: DashboardOptions): void {
-    const { snapshot, weeklyTrend, uptime, lastRefresh, isLoading, error } = state;
+    const { snapshot, weeklyTrend, uptime, lastRefresh, isLoading, error, tokenUsageStats } = state;
 
     // Use full terminal width/height
     const termWidth = process.stdout.columns || 80;
@@ -506,7 +643,7 @@ function renderDashboard(state: DashboardState, options: DashboardOptions): void
     const lines: string[] = [];
 
     // Add top padding for centering
-    const contentHeight = estimateContentHeight(snapshot);
+    const contentHeight = estimateContentHeight(snapshot, tokenUsageStats);
     const topPadding = Math.max(0, Math.floor((termHeight - contentHeight) / 2) - 1);
     for (let i = 0; i < topPadding; i++) {
         lines.push('');
@@ -548,6 +685,45 @@ function renderDashboard(state: DashboardState, options: DashboardOptions): void
         // Only show tier (e.g., "Google AI Ultra"), planName is redundant
         const userLine = `  ${chalk.bold.white(userName)}  ${chalk.dim('│')}  ${chalk.yellow(userTier)}`;
         lines.push(pad + chalk.cyan('║') + padEndAnsi(userLine, width - 2) + chalk.cyan('║'));
+        lines.push(pad + chalk.cyan('╟' + '─'.repeat(width - 2) + '╢'));
+    }
+
+    // Token usage statistics (daily/weekly/monthly)
+    if (tokenUsageStats) {
+        lines.push(pad + chalk.cyan('║') + padEndAnsi(chalk.dim('  TOKEN USAGE'), width - 2) + chalk.cyan('║'));
+        lines.push(pad + chalk.cyan('║') + ' '.repeat(width - 2) + chalk.cyan('║'));
+
+        // Calculate spacing for three columns with separators
+        // Separator is ' │ ' which is 3 characters (space + pipe + space)
+        const separator = chalk.dim(' │ ');
+        const separatorWidth = 3; // Actual width of separator
+        const leftPadding = 2; // Left padding inside box
+        const availableWidth = width - 2 - leftPadding; // Total available width inside box
+        const colWidth = Math.floor((availableWidth - separatorWidth * 2) / 3); // Three columns, two separators
+
+        const dailyLabel = chalk.dim('Today:');
+        const weeklyLabel = chalk.dim('This Week:');
+        const monthlyLabel = chalk.dim('This Month:');
+
+        const dailyValue = chalk.bold.cyan(formatTokens(tokenUsageStats.daily));
+        const weeklyValue = chalk.bold.yellow(formatTokens(tokenUsageStats.weekly));
+        const monthlyValue = chalk.bold.magenta(formatTokens(tokenUsageStats.monthly));
+
+        // First row: labels - pad to column width
+        const dailyLabelPadded = padEndAnsi(dailyLabel, colWidth);
+        const weeklyLabelPadded = padEndAnsi(weeklyLabel, colWidth);
+        const monthlyLabelPadded = padEndAnsi(monthlyLabel, colWidth);
+        const labelRow = ' '.repeat(leftPadding) + dailyLabelPadded + separator + weeklyLabelPadded + separator + monthlyLabelPadded;
+        lines.push(pad + chalk.cyan('║') + padEndAnsi(labelRow, width - 2) + chalk.cyan('║'));
+
+        // Second row: values - pad to column width
+        const dailyValuePadded = padEndAnsi(dailyValue, colWidth);
+        const weeklyValuePadded = padEndAnsi(weeklyValue, colWidth);
+        const monthlyValuePadded = padEndAnsi(monthlyValue, colWidth);
+        const valueRow = ' '.repeat(leftPadding) + dailyValuePadded + separator + weeklyValuePadded + separator + monthlyValuePadded;
+        lines.push(pad + chalk.cyan('║') + padEndAnsi(valueRow, width - 2) + chalk.cyan('║'));
+
+        lines.push(pad + chalk.cyan('║') + ' '.repeat(width - 2) + chalk.cyan('║'));
         lines.push(pad + chalk.cyan('╟' + '─'.repeat(width - 2) + '╢'));
     }
 
@@ -626,7 +802,7 @@ function renderDashboard(state: DashboardState, options: DashboardOptions): void
     lines.push(pad + chalk.cyan('╟' + '─'.repeat(width - 2) + '╢'));
 
     // Weekly trend with proper spacing
-    lines.push(pad + chalk.cyan('║') + padEndAnsi(chalk.dim('  WEEKLY TREND'), width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + padEndAnsi(chalk.dim('  WEEKLY TREND (Past 7 Days Usage)'), width - 2) + chalk.cyan('║'));
     lines.push(pad + chalk.cyan('║') + ' '.repeat(width - 2) + chalk.cyan('║'));
 
     // Calculate spacing for weekly trend
@@ -698,9 +874,10 @@ function padEndAnsi(str: string, width: number): string {
 /**
  * Estimate content height for centering
  */
-function estimateContentHeight(snapshot: QuotaSnapshot | null): number {
+function estimateContentHeight(snapshot: QuotaSnapshot | null, tokenUsageStats: TokenUsageStats | null): number {
     let height = 10; // Base (header, status, footer, etc.)
     if (snapshot?.userInfo) height += 2;
+    if (tokenUsageStats) height += 5; // Token usage stats section
     if (snapshot?.tokenUsage) height += 6;
     height += Math.min(7, snapshot?.models.length || 0) + 4;
     height += 4; // Weekly trend

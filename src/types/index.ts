@@ -87,5 +87,8 @@ export interface DailyUsage {
 
 export interface WeeklyTrend {
     day: string;
+    date?: string;
+    inputTokens?: number;
+    outputTokens?: number;
     percentage: number;
 }

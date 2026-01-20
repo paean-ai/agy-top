@@ -4,6 +4,7 @@
  */
 
 import axios, { type AxiosInstance } from 'axios';
+import https from 'https';
 import { getApiUrl, getAuthToken } from '../utils/config.js';
 import type {
     UsageSubmission,
@@ -14,6 +15,27 @@ import type {
 
 let publicClient: AxiosInstance | null = null;
 let authClient: AxiosInstance | null = null;
+
+/**
+ * Create HTTPS agent with SSL verification handling
+ */
+function createHttpsAgent() {
+    // Allow skipping SSL verification via environment variable (for development)
+    const skipSSLVerify = process.env.AGY_SKIP_SSL_VERIFY === 'true';
+    
+    // Create agent with default settings - let Node.js handle TLS negotiation
+    // Don't restrict to specific TLS version as it may cause issues with modern certificates
+    const agentOptions: https.AgentOptions = {
+        rejectUnauthorized: !skipSSLVerify,
+        // Use default keepAlive settings for better performance
+        keepAlive: true,
+        keepAliveMsecs: 1000,
+        maxSockets: 50,
+        maxFreeSockets: 10,
+    };
+    
+    return new https.Agent(agentOptions);
+}
 
 /**
  * Get public API client (no auth required)
@@ -27,7 +49,56 @@ export function getPublicApiClient(): AxiosInstance {
                 'Content-Type': 'application/json',
                 'X-Client': 'agy-top',
             },
+            httpsAgent: createHttpsAgent(),
         });
+
+        // Add error interceptor to provide better error messages
+        publicClient.interceptors.response.use(
+            (response) => response,
+            (error) => {
+                // Check for SSL/TLS certificate errors
+                const isSSLError = error.code === 'CERT_HAS_EXPIRED' || 
+                    error.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
+                    error.code === 'CERT_SIGNATURE_FAILURE' ||
+                    error.code === 'SELF_SIGNED_CERT_IN_CHAIN' ||
+                    error.code === 'DEPTH_ZERO_SELF_SIGNED_CERT' ||
+                    error.code === 'UNABLE_TO_GET_ISSUER_CERT' ||
+                    error.code === 'UNABLE_TO_GET_CRL' ||
+                    error.code === 'UNABLE_TO_DECRYPT_CERT_SIGNATURE' ||
+                    error.code === 'UNABLE_TO_DECRYPT_CRL_SIGNATURE' ||
+                    error.code === 'UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY' ||
+                    error.code === 'CERT_CHAIN_TOO_LONG' ||
+                    error.code === 'CERT_REVOKED' ||
+                    error.code === 'INVALID_CA' ||
+                    error.code === 'PATH_LENGTH_EXCEEDED' ||
+                    error.code === 'INVALID_PURPOSE' ||
+                    error.code === 'CERT_UNTRUSTED' ||
+                    error.code === 'CERT_REJECTED' ||
+                    error.message?.includes('certificate') ||
+                    error.message?.includes('SSL') ||
+                    error.message?.includes('TLS') ||
+                    error.message?.includes('certificate verification') ||
+                    error.message?.includes('cert') ||
+                    (error.response === undefined && error.request !== undefined); // Network errors without response
+                
+                if (isSSLError) {
+                    const runtime = typeof process !== 'undefined' && typeof process.versions?.bun !== 'undefined' ? 'Bun' : 'Node.js';
+                    const enhancedError = new Error(
+                        `SSL Certificate Error: ${error.message || error.code || 'unknown certificate verification error'}\n` +
+                        `Runtime: ${runtime}\n` +
+                        `API URL: ${getApiUrl()}\n` +
+                        `\nPossible solutions:\n` +
+                        `1. If you're in a development environment, set AGY_SKIP_SSL_VERIFY=true\n` +
+                        `2. Check your system's CA certificates are up to date\n` +
+                        `3. Verify the API server's certificate is valid\n` +
+                        `\nNote: Skipping SSL verification should only be used in development, not in production.`
+                    );
+                    enhancedError.cause = error;
+                    throw enhancedError;
+                }
+                throw error;
+            }
+        );
     }
     return publicClient;
 }
@@ -44,6 +115,7 @@ export function getApiClient(): AxiosInstance {
                 'Content-Type': 'application/json',
                 'X-Client': 'agy-top',
             },
+            httpsAgent: createHttpsAgent(),
         });
 
         // Add auth interceptor
@@ -54,6 +126,54 @@ export function getApiClient(): AxiosInstance {
             }
             return config;
         });
+
+        // Add error interceptor to provide better error messages
+        authClient.interceptors.response.use(
+            (response) => response,
+            (error) => {
+                // Check for SSL/TLS certificate errors
+                const isSSLError = error.code === 'CERT_HAS_EXPIRED' || 
+                    error.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
+                    error.code === 'CERT_SIGNATURE_FAILURE' ||
+                    error.code === 'SELF_SIGNED_CERT_IN_CHAIN' ||
+                    error.code === 'DEPTH_ZERO_SELF_SIGNED_CERT' ||
+                    error.code === 'UNABLE_TO_GET_ISSUER_CERT' ||
+                    error.code === 'UNABLE_TO_GET_CRL' ||
+                    error.code === 'UNABLE_TO_DECRYPT_CERT_SIGNATURE' ||
+                    error.code === 'UNABLE_TO_DECRYPT_CRL_SIGNATURE' ||
+                    error.code === 'UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY' ||
+                    error.code === 'CERT_CHAIN_TOO_LONG' ||
+                    error.code === 'CERT_REVOKED' ||
+                    error.code === 'INVALID_CA' ||
+                    error.code === 'PATH_LENGTH_EXCEEDED' ||
+                    error.code === 'INVALID_PURPOSE' ||
+                    error.code === 'CERT_UNTRUSTED' ||
+                    error.code === 'CERT_REJECTED' ||
+                    error.message?.includes('certificate') ||
+                    error.message?.includes('SSL') ||
+                    error.message?.includes('TLS') ||
+                    error.message?.includes('certificate verification') ||
+                    error.message?.includes('cert') ||
+                    (error.response === undefined && error.request !== undefined); // Network errors without response
+                
+                if (isSSLError) {
+                    const runtime = typeof process !== 'undefined' && typeof process.versions?.bun !== 'undefined' ? 'Bun' : 'Node.js';
+                    const enhancedError = new Error(
+                        `SSL Certificate Error: ${error.message || error.code || 'unknown certificate verification error'}\n` +
+                        `Runtime: ${runtime}\n` +
+                        `API URL: ${getApiUrl()}\n` +
+                        `\nPossible solutions:\n` +
+                        `1. If you're in a development environment, set AGY_SKIP_SSL_VERIFY=true\n` +
+                        `2. Check your system's CA certificates are up to date\n` +
+                        `3. Verify the API server's certificate is valid\n` +
+                        `\nNote: Skipping SSL verification should only be used in development, not in production.`
+                    );
+                    enhancedError.cause = error;
+                    throw enhancedError;
+                }
+                throw error;
+            }
+        );
     }
     return authClient;
 }
