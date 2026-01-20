@@ -272,14 +272,31 @@ async function performSubmit(state: DashboardState): Promise<void> {
 async function doSubmit(state: DashboardState): Promise<{ success: boolean; rank?: number; trustScore?: number; message?: string }> {
     const snapshot = state.snapshot!;
 
-    // Calculate current cumulative usage
+    // Calculate current usage from BOTH credits AND model quotas
+    // Credits: promptCredits and flowCredits
     const promptMonthly = snapshot.tokenUsage?.promptCredits?.monthly || 0;
     const flowMonthly = snapshot.tokenUsage?.flowCredits?.monthly || 0;
     const promptAvailable = snapshot.tokenUsage?.promptCredits?.available || 0;
     const flowAvailable = snapshot.tokenUsage?.flowCredits?.available || 0;
 
-    const currentUsedPrompt = promptMonthly - promptAvailable;
-    const currentUsedFlow = flowMonthly - flowAvailable;
+    const creditsUsedPrompt = promptMonthly - promptAvailable;
+    const creditsUsedFlow = flowMonthly - flowAvailable;
+
+    // Model quotas: sum of (100 - remainingPercentage) across all models
+    // This represents actual model usage even if credits don't reflect it
+    const modelUsageTotal = snapshot.models.reduce((sum, m) => sum + (100 - m.remainingPercentage), 0);
+
+    // Estimate tokens from model usage (each model can use ~50K tokens when at 0%)
+    // This is a rough estimate: 50K tokens per model * usage percentage
+    const estimatedTokensPerModel = 50000; // Conservative estimate
+    const modelBasedTokens = snapshot.models.reduce((sum, m) => {
+        const usedPercent = (100 - m.remainingPercentage) / 100;
+        return sum + Math.floor(estimatedTokensPerModel * usedPercent);
+    }, 0);
+
+    // Use the larger of credits-based or model-based usage
+    const currentUsedPrompt = Math.max(creditsUsedPrompt, Math.floor(modelBasedTokens * 0.6));
+    const currentUsedFlow = Math.max(creditsUsedFlow, Math.floor(modelBasedTokens * 0.4));
 
     // Get last submission usage to calculate incremental diff
     const lastSubmission = getLastSubmission();
@@ -291,12 +308,23 @@ async function doSubmit(state: DashboardState): Promise<{ success: boolean; rank
     let incrementalOutput = currentUsedFlow - lastUsedFlow;
 
     // If quota reset happened (current < last), we assume the entire current usage is new
-    // except if we detected it's just a small glitch, but typically reset means reset.
     if (incrementalInput < 0) incrementalInput = currentUsedPrompt;
     if (incrementalOutput < 0) incrementalOutput = currentUsedFlow;
 
-    if (incrementalInput <= 0 && incrementalOutput <= 0) {
+    // Also check for model quota changes (even if credits haven't changed)
+    const lastModelUsage = lastSubmission ? (lastUsedPrompt + lastUsedFlow) : 0;
+    const currentModelUsage = currentUsedPrompt + currentUsedFlow;
+    const hasModelChange = currentModelUsage > lastModelUsage;
+
+    if (incrementalInput <= 0 && incrementalOutput <= 0 && !hasModelChange) {
         return { success: false, message: 'No new usage to submit' };
+    }
+
+    // Ensure we have at least something to submit
+    if (incrementalInput <= 0 && incrementalOutput <= 0 && hasModelChange) {
+        // Force minimum submission based on model change
+        incrementalInput = Math.max(1, currentUsedPrompt - lastUsedPrompt);
+        incrementalOutput = Math.max(1, currentUsedFlow - lastUsedFlow);
     }
 
     // Build model breakdown for this increment
@@ -764,19 +792,26 @@ function renderHelp(state: DashboardState, options: DashboardOptions): void {
 /**
  * Render submit view with same styling
  */
-function renderSubmit(state: DashboardState, options: DashboardOptions): void {
+function renderSubmit(state: DashboardState, _options: DashboardOptions): void {
     const termWidth = process.stdout.columns || 80;
     const width = Math.min(termWidth, 80);
     const leftPad = Math.max(0, Math.floor((termWidth - width) / 2));
     const pad = ' '.repeat(leftPad);
 
+    // Clean message: replace emoji with ASCII for consistent width
+    const cleanMessage = (state.submitMessage || 'Processing...')
+        .replace(/✓/g, '[OK]')
+        .replace(/✗/g, '[X]')
+        .replace(/⚠/g, '[!]')
+        .replace(/△/g, '[!]');
+
     const lines: string[] = [];
 
     lines.push(pad + chalk.cyan('╔' + '═'.repeat(width - 2) + '╗'));
-    lines.push(pad + chalk.cyan('║') + centerText(chalk.bold('📤 Submit Usage Data'), width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + centerText(chalk.bold('Submit Usage Data'), width - 2) + chalk.cyan('║'));
     lines.push(pad + chalk.cyan('╠' + '═'.repeat(width - 2) + '╣'));
     lines.push(pad + chalk.cyan('║') + ' '.repeat(width - 2) + chalk.cyan('║'));
-    lines.push(pad + chalk.cyan('║') + centerText(chalk.yellow(state.submitMessage || 'Processing...'), width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + centerText(chalk.yellow(cleanMessage), width - 2) + chalk.cyan('║'));
     lines.push(pad + chalk.cyan('║') + ' '.repeat(width - 2) + chalk.cyan('║'));
     lines.push(pad + chalk.cyan('╟' + '─'.repeat(width - 2) + '╢'));
     lines.push(pad + chalk.cyan('║') + centerText(chalk.dim('Press any key to return to dashboard...'), width - 2) + chalk.cyan('║'));
