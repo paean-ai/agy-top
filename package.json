@@ -1,6 +1,6 @@
 {
     "name": "agy-top",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "ASCII-styled usage statistics for Antigravity with leaderboard",
     "author": "Paean AI <dev@paean.ai>",
     "license": "MIT",
@@ -56,7 +56,7 @@
     },
     "repository": {
         "type": "git",
-        "url": "git@git_fzh:paean-opensource/agy-top.git"
+        "url": "git+https://github.com/paean-ai/agy-top.git"
     },
     "keywords": [
         "antigravity",
@@ -70,6 +70,6 @@
     ],
     "homepage": "https://paean.ai",
     "bugs": {
-        "url": "https://github.com/paean-opensource/agy-top/issues"
+        "url": "https://github.com/paean-ai/agy-top/issues"
     }
 }

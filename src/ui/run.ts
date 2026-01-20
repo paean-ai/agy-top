@@ -9,6 +9,8 @@ import { detectAntigravityServer, type ServerInfo } from '../data/server-detecto
 import { fetchQuota, type QuotaSnapshot } from '../data/quota-service.js';
 import { isAuthenticated } from '../utils/config.js';
 import { formatTokens, progressBar, miniBar } from '../utils/output.js';
+import { showRank } from '../commands/rank.js';
+import { submitUsage } from '../commands/submit.js';
 import type { DashboardOptions, WeeklyTrend } from '../types/index.js';
 
 const VERSION = '0.1.0';
@@ -98,6 +100,32 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
                 await refreshData(state);
                 state.isLoading = false;
                 render(state, options);
+            }
+            if (key === 'l' && options.rankMode) {
+                // Show leaderboard
+                logUpdate.clear();
+                process.stdout.write('\x1B[?25h'); // Show cursor
+                console.clear();
+                await showRank({ period: 'weekly', limit: 20 });
+                console.log(chalk.dim('\nPress any key to return to dashboard...'));
+                process.stdin.once('data', () => {
+                    process.stdout.write('\x1B[?25l'); // Hide cursor
+                    console.clear();
+                    render(state, options);
+                });
+            }
+            if (key === 's' && options.rankMode) {
+                // Submit usage data
+                logUpdate.clear();
+                process.stdout.write('\x1B[?25h'); // Show cursor
+                console.clear();
+                await submitUsage();
+                console.log(chalk.dim('\nPress any key to return to dashboard...'));
+                process.stdin.once('data', () => {
+                    process.stdout.write('\x1B[?25l'); // Hide cursor
+                    console.clear();
+                    render(state, options);
+                });
             }
             if (key === '?') {
                 showHelp();

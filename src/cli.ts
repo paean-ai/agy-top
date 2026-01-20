@@ -13,7 +13,7 @@ import { logoutCommand } from './commands/logout.js';
 import { rankCommand } from './commands/rank.js';
 import { submitCommand } from './commands/submit.js';
 import { runDashboard } from './ui/run.js';
-import { getConfigPath } from './utils/config.js';
+import { getConfigPath, isAuthenticated } from './utils/config.js';
 
 // Read version from package.json
 const __filename = fileURLToPath(import.meta.url);
@@ -37,9 +37,12 @@ program
             return;
         }
 
+        // Auto-enable rank mode when user is authenticated
+        const rankMode = options.rank || isAuthenticated();
+
         // Default action: show dashboard
         await runDashboard({
-            rankMode: options.rank || false,
+            rankMode,
             autoRefresh: options.refresh !== false,
             refreshInterval: parseInt(options.interval, 10) * 1000,
             debug: options.debug || false,

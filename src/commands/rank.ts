@@ -120,3 +120,72 @@ function formatTier(tier: string): string {
         default: return chalk.dim('Free');
     }
 }
+
+/**
+ * Show rank (exportable for dashboard integration)
+ */
+export async function showRank(options: { period?: string; limit?: number } = {}): Promise<void> {
+    const period = (options.period || 'weekly') as 'daily' | 'weekly' | 'monthly' | 'all_time';
+    const limit = options.limit || 20;
+
+    output.header('🏆 agy-top Leaderboard');
+
+    const spin = output.spinner('Fetching leaderboard...').start();
+
+    try {
+        const data = await ApiClient.getLeaderboard({ period, limit });
+        spin.stop();
+
+        output.info(`${formatPeriod(period)} Rankings`);
+        output.newline();
+
+        if (data.entries.length === 0) {
+            output.dim('No entries yet. Be the first to submit!');
+            return;
+        }
+
+        const table = new Table({
+            head: [
+                chalk.dim('Rank'),
+                chalk.dim('User'),
+                chalk.dim('Total Tokens'),
+                chalk.dim('Sessions'),
+                chalk.dim('Tier'),
+            ],
+            style: { head: [], border: ['dim'] },
+            chars: {
+                'top': '─', 'top-mid': '┬', 'top-left': '┌', 'top-right': '┐',
+                'bottom': '─', 'bottom-mid': '┴', 'bottom-left': '└', 'bottom-right': '┘',
+                'left': '│', 'left-mid': '├', 'mid': '─', 'mid-mid': '┼',
+                'right': '│', 'right-mid': '┤', 'middle': '│'
+            }
+        });
+
+        for (const entry of data.entries) {
+            const rankIcon = getRankIcon(entry.rank);
+            const userStyle = entry.isCurrentUser ? chalk.cyan.bold : chalk.white;
+
+            table.push([
+                `${rankIcon} ${entry.rank}`,
+                userStyle(entry.displayName),
+                output.formatTokens(entry.totalTokens),
+                entry.sessionCount.toString(),
+                formatTier(entry.tier),
+            ]);
+        }
+
+        console.log(table.toString());
+
+        if (isAuthenticated() && data.userRank) {
+            output.newline();
+            output.info(`Your rank: #${data.userRank} of ${data.totalParticipants} participants`);
+        }
+
+        output.dim(`Total participants: ${data.totalParticipants}`);
+
+    } catch (error) {
+        spin.stop();
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        output.error(`Failed to fetch leaderboard: ${message}`);
+    }
+}
