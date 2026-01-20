@@ -23,15 +23,54 @@ interface ConfigSchema {
     };
 }
 
+// Correct default URLs
+const DEFAULT_API_URL = 'https://api.paean.ai';
+const DEFAULT_WEB_URL = 'https://app.paean.ai';
+
 const config = new Conf<ConfigSchema>({
     projectName: 'agy-top',
     defaults: {
         auth: {},
-        apiUrl: process.env.AGY_API_URL || 'https://api.paean.ai',
-        webUrl: process.env.AGY_WEB_URL || 'https://app.paean.ai',
+        apiUrl: process.env.AGY_API_URL || DEFAULT_API_URL,
+        webUrl: process.env.AGY_WEB_URL || DEFAULT_WEB_URL,
         installationId: generateInstallationId(),
     },
 });
+
+/**
+ * Fix incorrect URLs in config (e.g., zero.paean.ai -> api.paean.ai)
+ */
+function fixIncorrectUrls(): void {
+    const currentApiUrl = config.get('apiUrl');
+    const currentWebUrl = config.get('webUrl');
+    let needsFix = false;
+
+    // Fix incorrect API URL
+    if (currentApiUrl && currentApiUrl.includes('zero.paean.ai')) {
+        config.set('apiUrl', DEFAULT_API_URL);
+        needsFix = true;
+    }
+
+    // Fix incorrect Web URL (if any)
+    if (currentWebUrl && currentWebUrl.includes('zero.paean.ai')) {
+        config.set('webUrl', DEFAULT_WEB_URL);
+        needsFix = true;
+    }
+
+    // Ensure URLs are correct format
+    if (currentApiUrl && !currentApiUrl.startsWith('http')) {
+        config.set('apiUrl', DEFAULT_API_URL);
+        needsFix = true;
+    }
+
+    if (currentWebUrl && !currentWebUrl.startsWith('http')) {
+        config.set('webUrl', DEFAULT_WEB_URL);
+        needsFix = true;
+    }
+}
+
+// Auto-fix incorrect URLs on module load
+fixIncorrectUrls();
 
 /**
  * Generate a unique installation ID
@@ -63,16 +102,30 @@ export function setConfigValue<K extends keyof ConfigSchema>(key: K, value: Conf
 
 /**
  * Get the API URL
+ * Automatically fixes incorrect URLs if detected
  */
 export function getApiUrl(): string {
-    return config.get('apiUrl');
+    const url = config.get('apiUrl');
+    // Double-check and fix if needed (in case config was modified externally)
+    if (url && url.includes('zero.paean.ai')) {
+        config.set('apiUrl', DEFAULT_API_URL);
+        return DEFAULT_API_URL;
+    }
+    return url;
 }
 
 /**
  * Get the web URL
+ * Automatically fixes incorrect URLs if detected
  */
 export function getWebUrl(): string {
-    return config.get('webUrl');
+    const url = config.get('webUrl');
+    // Double-check and fix if needed (in case config was modified externally)
+    if (url && url.includes('zero.paean.ai')) {
+        config.set('webUrl', DEFAULT_WEB_URL);
+        return DEFAULT_WEB_URL;
+    }
+    return url;
 }
 
 /**
