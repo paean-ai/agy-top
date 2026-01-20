@@ -12,6 +12,7 @@ import { loginCommand } from './commands/login.js';
 import { logoutCommand } from './commands/logout.js';
 import { rankCommand } from './commands/rank.js';
 import { submitCommand } from './commands/submit.js';
+import { langCommand } from './commands/lang.js';
 import { runDashboard } from './ui/run.js';
 import { getConfigPath, isAuthenticated } from './utils/config.js';
 
@@ -54,6 +55,7 @@ program.addCommand(loginCommand);
 program.addCommand(logoutCommand);
 program.addCommand(rankCommand);
 program.addCommand(submitCommand);
+program.addCommand(langCommand);
 
 // Parse arguments
 program.parse();

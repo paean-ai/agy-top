@@ -11,11 +11,14 @@ import { isAuthenticated, getLastSubmission, storeLastSubmission } from '../util
 import { formatTokens, progressBar, miniBar } from '../utils/output.js';
 import { generateCumulativeChecksum } from '../utils/crypto.js';
 import { ApiClient } from '../api/client.js';
+import { t, initLocale, getLocale, setLocale, type SupportedLocale } from '../utils/i18n.js';
 import type { DashboardOptions, WeeklyTrend, LeaderboardData } from '../types/index.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.1';
 
 type ViewMode = 'dashboard' | 'leaderboard' | 'submit' | 'help';
+
+type LeaderboardPeriod = 'daily' | 'weekly' | 'monthly' | 'yearly' | 'all_time';
 
 interface DashboardState {
     server: ServerInfo | null;
@@ -31,6 +34,7 @@ interface DashboardState {
     leaderboardData: LeaderboardData | null;
     submitMessage: string | null;
     autoSubmitEnabled: boolean;
+    leaderboardPeriod: LeaderboardPeriod;
 }
 
 /**
@@ -38,6 +42,9 @@ interface DashboardState {
  */
 export async function runDashboard(options: DashboardOptions): Promise<void> {
     const startTime = Date.now();
+
+    // Initialize i18n
+    initLocale();
 
     // Clear screen and hide cursor for full-screen mode
     process.stdout.write('\x1B[?25l'); // Hide cursor
@@ -57,25 +64,26 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
         leaderboardData: null,
         submitMessage: null,
         autoSubmitEnabled: true,  // Enable auto-submit by default
+        leaderboardPeriod: 'weekly',
     };
 
     // Initial server detection
-    console.log(chalk.dim('🔍 Detecting Antigravity Language Server...'));
+    console.log(chalk.dim(t('detectingServer')));
 
     const detection = await detectAntigravityServer();
     if (!detection.success || !detection.server) {
         process.stdout.write('\x1B[?25h'); // Show cursor
-        console.log(chalk.red('✗ ' + (detection.error || 'Failed to detect Language Server')));
+        console.log(chalk.red('✗ ' + (detection.error || t('serverNotFound'))));
         if (detection.tip) {
             console.log(chalk.yellow('  Tip: ' + detection.tip));
         }
-        console.log(chalk.dim('\nMake sure Antigravity IDE is running and try again.'));
+        console.log(chalk.dim('\n' + t('tipIdeRunning')));
         process.exit(1);
     }
 
     state.server = detection.server;
-    console.log(chalk.green(`✓ Found Language Server on port ${detection.server.port}`));
-    console.log(chalk.dim('  Starting dashboard...\n'));
+    console.log(chalk.green(`${t('serverFound')} ${detection.server.port}`));
+    console.log(chalk.dim(`  ${t('startingDashboard')}\n`));
 
     // Initial data load
     await refreshData(state, options);
@@ -115,7 +123,72 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
         };
 
         process.stdin.on('data', async (key: string) => {
-            // Handle based on current view
+            // Handle leaderboard view key handlers (period switching)
+            if (state.currentView === 'leaderboard') {
+                const periods: LeaderboardPeriod[] = ['daily', 'weekly', 'monthly', 'yearly', 'all_time'];
+                const currentIdx = periods.indexOf(state.leaderboardPeriod);
+
+                // Number keys 1-5 for direct period selection
+                if (key >= '1' && key <= '5') {
+                    const newPeriod = periods[parseInt(key) - 1];
+                    if (newPeriod !== state.leaderboardPeriod) {
+                        state.leaderboardPeriod = newPeriod;
+                        state.isLoading = true;
+                        render(state, options);
+                        try {
+                            state.leaderboardData = await ApiClient.getLeaderboard({ period: state.leaderboardPeriod, limit: 20 });
+                        } catch (error) {
+                            state.error = error instanceof Error ? error.message : 'Failed to fetch leaderboard';
+                        }
+                        state.isLoading = false;
+                        render(state, options);
+                    }
+                    return;
+                }
+
+                // Left/Right arrow keys for cycling periods
+                if (key === '\x1B[D' || key === 'h') { // Left arrow or h
+                    if (currentIdx > 0) {
+                        state.leaderboardPeriod = periods[currentIdx - 1];
+                        state.isLoading = true;
+                        render(state, options);
+                        try {
+                            state.leaderboardData = await ApiClient.getLeaderboard({ period: state.leaderboardPeriod, limit: 20 });
+                        } catch (error) {
+                            state.error = error instanceof Error ? error.message : 'Failed to fetch leaderboard';
+                        }
+                        state.isLoading = false;
+                        render(state, options);
+                    }
+                    return;
+                }
+                if (key === '\x1B[C' || key === 'l') { // Right arrow or l (vim style)
+                    if (currentIdx < periods.length - 1) {
+                        state.leaderboardPeriod = periods[currentIdx + 1];
+                        state.isLoading = true;
+                        render(state, options);
+                        try {
+                            state.leaderboardData = await ApiClient.getLeaderboard({ period: state.leaderboardPeriod, limit: 20 });
+                        } catch (error) {
+                            state.error = error instanceof Error ? error.message : 'Failed to fetch leaderboard';
+                        }
+                        state.isLoading = false;
+                        render(state, options);
+                    }
+                    return;
+                }
+
+                // q or Escape to return to dashboard
+                if (key === 'q' || key === '\x1B' || key === '\u0003') {
+                    state.currentView = 'dashboard';
+                    state.leaderboardData = null;
+                    render(state, options);
+                    return;
+                }
+                return; // Ignore other keys in leaderboard view
+            }
+
+            // Handle other non-dashboard views (help, submit)
             if (state.currentView !== 'dashboard') {
                 // Any key returns to dashboard from other views
                 state.currentView = 'dashboard';
@@ -141,7 +214,7 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
                 state.isLoading = true;
                 render(state, options);
                 try {
-                    state.leaderboardData = await ApiClient.getLeaderboard({ period: 'weekly', limit: 20 });
+                    state.leaderboardData = await ApiClient.getLeaderboard({ period: state.leaderboardPeriod, limit: 20 });
                 } catch (error) {
                     state.error = error instanceof Error ? error.message : 'Failed to fetch leaderboard';
                 }
@@ -472,8 +545,8 @@ function renderDashboard(state: DashboardState, options: DashboardOptions): void
     if (snapshot?.userInfo) {
         const userName = snapshot.userInfo.name || 'User';
         const userTier = snapshot.userInfo.tier || 'Free';
-        const planName = snapshot.userInfo.planName || '';
-        const userLine = `  ${chalk.bold.white(userName)}  ${chalk.dim('│')}  ${chalk.yellow(userTier)}  ${chalk.dim('│')}  ${chalk.cyan(planName)}`;
+        // Only show tier (e.g., "Google AI Ultra"), planName is redundant
+        const userLine = `  ${chalk.bold.white(userName)}  ${chalk.dim('│')}  ${chalk.yellow(userTier)}`;
         lines.push(pad + chalk.cyan('║') + padEndAnsi(userLine, width - 2) + chalk.cyan('║'));
         lines.push(pad + chalk.cyan('╟' + '─'.repeat(width - 2) + '╢'));
     }
@@ -720,23 +793,37 @@ function renderLeaderboard(state: DashboardState, options: DashboardOptions): vo
 
     const lines: string[] = [];
 
+    // Period labels with selection indicator (using i18n)
+    const periodLabels: { [key in LeaderboardPeriod]: string } = {
+        daily: t('periodDailyShort'),
+        weekly: t('periodWeeklyShort'),
+        monthly: t('periodMonthlyShort'),
+        yearly: t('periodYearlyShort'),
+        all_time: t('periodAllTimeShort'),
+    };
+    const periodTabs = (['daily', 'weekly', 'monthly', 'yearly', 'all_time'] as LeaderboardPeriod[])
+        .map(p => p === state.leaderboardPeriod
+            ? chalk.cyan.bold(`[${periodLabels[p]}]`)
+            : chalk.dim(` ${periodLabels[p]} `))
+        .join(' ');
+
     // Header
     lines.push(pad + chalk.cyan('╔' + '═'.repeat(width - 2) + '╗'));
-    lines.push(pad + chalk.cyan('║') + centerText(chalk.bold('🏆 agy-top Leaderboard'), width - 2) + chalk.cyan('║'));
-    lines.push(pad + chalk.cyan('║') + centerText(chalk.dim('Weekly Rankings'), width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + centerText(chalk.bold(t('leaderboard')), width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + centerText(periodTabs, width - 2) + chalk.cyan('║'));
     lines.push(pad + chalk.cyan('╠' + '═'.repeat(width - 2) + '╣'));
 
     if (state.isLoading) {
-        lines.push(pad + chalk.cyan('║') + centerText(chalk.yellow('Loading leaderboard...'), width - 2) + chalk.cyan('║'));
+        lines.push(pad + chalk.cyan('║') + centerText(chalk.yellow(t('loadingLeaderboard')), width - 2) + chalk.cyan('║'));
     } else if (state.error) {
         lines.push(pad + chalk.cyan('║') + padEndAnsi(chalk.red(`  ⚠ ${state.error}`), width - 2) + chalk.cyan('║'));
     } else if (!state.leaderboardData || state.leaderboardData.entries.length === 0) {
         lines.push(pad + chalk.cyan('║') + ' '.repeat(width - 2) + chalk.cyan('║'));
-        lines.push(pad + chalk.cyan('║') + centerText(chalk.dim('No entries yet. Be the first to submit!'), width - 2) + chalk.cyan('║'));
+        lines.push(pad + chalk.cyan('║') + centerText(chalk.dim(t('noEntriesYet')), width - 2) + chalk.cyan('║'));
         lines.push(pad + chalk.cyan('║') + ' '.repeat(width - 2) + chalk.cyan('║'));
     } else {
         // Table header
-        const header = `  ${'RANK'.padEnd(8)}${'USER'.padEnd(25)}${'TOKENS'.padEnd(15)}${'TIER'.padEnd(10)}`;
+        const header = `  ${t('rank').padEnd(8)}${t('user').padEnd(25)}${t('tokens').padEnd(15)}${t('tier').padEnd(10)}`;
         lines.push(pad + chalk.cyan('║') + padEndAnsi(chalk.dim(header), width - 2) + chalk.cyan('║'));
         lines.push(pad + chalk.cyan('╟' + '─'.repeat(width - 2) + '╢'));
 
@@ -754,7 +841,7 @@ function renderLeaderboard(state: DashboardState, options: DashboardOptions): vo
 
     lines.push(pad + chalk.cyan('║') + ' '.repeat(width - 2) + chalk.cyan('║'));
     lines.push(pad + chalk.cyan('╟' + '─'.repeat(width - 2) + '╢'));
-    lines.push(pad + chalk.cyan('║') + centerText(chalk.dim('Press any key to return to dashboard...'), width - 2) + chalk.cyan('║'));
+    lines.push(pad + chalk.cyan('║') + centerText(chalk.dim(t('leaderboardControls')), width - 2) + chalk.cyan('║'));
     lines.push(pad + chalk.cyan('╚' + '═'.repeat(width - 2) + '╝'));
 
     logUpdate(lines.join('\n'));

@@ -95,7 +95,7 @@ export class ApiClient {
      * Get leaderboard
      */
     static async getLeaderboard(params?: {
-        period?: 'daily' | 'weekly' | 'monthly' | 'all_time';
+        period?: 'daily' | 'weekly' | 'monthly' | 'yearly' | 'all_time';
         limit?: number;
     }): Promise<LeaderboardData> {
         const client = getPublicApiClient();
@@ -106,7 +106,7 @@ export class ApiClient {
     /**
      * Get user's current rank
      */
-    static async getMyRank(period?: 'daily' | 'weekly' | 'monthly' | 'all_time'): Promise<{
+    static async getMyRank(period?: 'daily' | 'weekly' | 'monthly' | 'yearly' | 'all_time'): Promise<{
         rank: number;
         totalTokens: number;
         totalParticipants: number;
