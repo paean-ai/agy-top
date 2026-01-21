@@ -21,6 +21,22 @@ interface ConfigSchema {
         totalUsedInput?: number;
         totalUsedOutput?: number;
     };
+    tokenEstimatorState?: {
+        quotaHistory?: Array<[string, {
+            modelId: string;
+            category: string;
+            previousPercentage: number;
+            currentPercentage: number;
+            lastUpdated: string;
+        }]>;
+        accumulatedUsage?: {
+            gemini_flash: number;
+            gemini_pro: number;
+            claude: number;
+            total: number;
+            lastUpdated: string;
+        };
+    };
 }
 
 // Correct default URLs
@@ -195,4 +211,18 @@ export function storeLastSubmission(data: { timestamp: string; checksum: string;
  */
 export function getLastSubmission(): { timestamp: string; checksum: string; totalUsedInput?: number; totalUsedOutput?: number } | undefined {
     return config.get('lastSubmission');
+}
+
+/**
+ * Store token estimator state
+ */
+export function storeTokenEstimatorState(state: ConfigSchema['tokenEstimatorState']): void {
+    config.set('tokenEstimatorState', state);
+}
+
+/**
+ * Get token estimator state
+ */
+export function getTokenEstimatorState(): ConfigSchema['tokenEstimatorState'] | undefined {
+    return config.get('tokenEstimatorState');
 }

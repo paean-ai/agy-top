@@ -7,14 +7,15 @@ import logUpdate from 'log-update';
 import chalk from 'chalk';
 import { detectAntigravityServer, type ServerInfo } from '../data/server-detector.js';
 import { fetchQuota, type QuotaSnapshot } from '../data/quota-service.js';
-import { isAuthenticated, getLastSubmission, storeLastSubmission } from '../utils/config.js';
+import { isAuthenticated, getLastSubmission, storeLastSubmission, getTokenEstimatorState, storeTokenEstimatorState } from '../utils/config.js';
+import { TokenEstimator, type EstimatedTokenUsage } from '../data/token-estimator.js';
 import { formatTokens, progressBar, miniBar } from '../utils/output.js';
 import { generateCumulativeChecksum } from '../utils/crypto.js';
 import { ApiClient } from '../api/client.js';
 import { t, initLocale, getLocale, setLocale, type SupportedLocale } from '../utils/i18n.js';
 import type { DashboardOptions, WeeklyTrend, LeaderboardData } from '../types/index.js';
 
-const VERSION = '0.2.1';
+const VERSION = '0.2.5';
 
 type ViewMode = 'dashboard' | 'leaderboard' | 'submit' | 'help';
 
@@ -42,6 +43,8 @@ interface DashboardState {
     autoSubmitEnabled: boolean;
     leaderboardPeriod: LeaderboardPeriod;
     tokenUsageStats: TokenUsageStats | null;
+    tokenEstimator: TokenEstimator;
+    estimatedUsage: EstimatedTokenUsage | null;
 }
 
 /**
@@ -52,6 +55,18 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
 
     // Initialize i18n
     initLocale();
+
+    // Initialize token estimator from persisted state
+    const savedEstimatorState = getTokenEstimatorState();
+    const tokenEstimator = savedEstimatorState
+        ? TokenEstimator.fromState({
+            quotaHistory: savedEstimatorState.quotaHistory?.map(([k, v]) => [k, { ...v, lastUpdated: new Date(v.lastUpdated) }]),
+            accumulatedUsage: savedEstimatorState.accumulatedUsage ? {
+                ...savedEstimatorState.accumulatedUsage,
+                lastUpdated: new Date(savedEstimatorState.accumulatedUsage.lastUpdated)
+            } : undefined
+        })
+        : new TokenEstimator();
 
     // Clear screen and hide cursor for full-screen mode
     process.stdout.write('\x1B[?25l'); // Hide cursor
@@ -73,6 +88,8 @@ export async function runDashboard(options: DashboardOptions): Promise<void> {
         autoSubmitEnabled: true,  // Enable auto-submit by default
         leaderboardPeriod: 'weekly',
         tokenUsageStats: null,
+        tokenEstimator,
+        estimatedUsage: null,
     };
 
     // Initial server detection
@@ -299,6 +316,43 @@ async function refreshData(state: DashboardState, options: DashboardOptions): Pr
         } catch (error) {
             // Silently fail - token stats are optional
         }
+
+        // Update token estimation from model quota changes
+        if (state.snapshot?.models && state.snapshot.models.length > 0) {
+            const tier = state.snapshot.userInfo?.tier;
+            const { tokensConsumed } = state.tokenEstimator.updateFromModels(
+                state.snapshot.models,
+                tier
+            );
+
+            // Update estimated usage
+            state.estimatedUsage = state.tokenEstimator.getAccumulatedUsage();
+
+            // If we estimated new tokens, update tokenUsageStats to reflect them
+            if (tokensConsumed > 0 && state.estimatedUsage) {
+                // Use estimated tokens for display when API data is not available
+                if (!state.tokenUsageStats || state.tokenUsageStats.daily === 0) {
+                    state.tokenUsageStats = {
+                        daily: state.estimatedUsage.total,
+                        weekly: state.estimatedUsage.total,
+                        monthly: state.estimatedUsage.total,
+                    };
+                }
+            }
+
+            // Persist estimator state
+            const estimatorState = state.tokenEstimator.getState();
+            storeTokenEstimatorState({
+                quotaHistory: estimatorState.quotaHistory.map(([k, v]) => [k, {
+                    ...v,
+                    lastUpdated: v.lastUpdated.toISOString(),
+                }]),
+                accumulatedUsage: {
+                    ...estimatorState.accumulatedUsage,
+                    lastUpdated: estimatorState.accumulatedUsage.lastUpdated.toISOString(),
+                },
+            });
+        }
     } catch (error) {
         state.error = error instanceof Error ? error.message : 'Refresh failed';
     }
@@ -358,9 +412,9 @@ async function fetchTokenUsageStats(state: DashboardState): Promise<void> {
         // they might be credits instead of tokens, or there's a data issue
         // Typical usage: millions to tens of millions of tokens per month
         const MAX_REASONABLE_TOKENS = 1_000_000_000; // 1 billion tokens
-        
-        if (dailyTokens > MAX_REASONABLE_TOKENS || 
-            weeklyTokens > MAX_REASONABLE_TOKENS || 
+
+        if (dailyTokens > MAX_REASONABLE_TOKENS ||
+            weeklyTokens > MAX_REASONABLE_TOKENS ||
             monthlyTokens > MAX_REASONABLE_TOKENS) {
             // Data seems invalid, fall back to snapshot-based calculation
             throw new Error('Token values exceed reasonable limits, using snapshot data instead');
@@ -409,12 +463,12 @@ async function fetchWeeklyTrend(state: DashboardState): Promise<void> {
     try {
         // Fetch weekly usage records (last 7 days)
         const weeklyResult = await ApiClient.getMyUsage({ period: 'weekly', limit: 30 });
-        
+
         if (weeklyResult.records && weeklyResult.records.length > 0) {
             // Group records by day
             const dailyUsageMap = new Map<string, number>();
             const now = new Date();
-            
+
             // Initialize all 7 days with 0
             for (let i = 6; i >= 0; i--) {
                 const date = new Date(now);
@@ -423,7 +477,7 @@ async function fetchWeeklyTrend(state: DashboardState): Promise<void> {
                 const dateStr = date.toISOString().split('T')[0];
                 dailyUsageMap.set(dateStr, 0);
             }
-            
+
             // Fill in actual usage data from records
             for (const record of weeklyResult.records as any[]) {
                 if (record.periodStart) {
@@ -443,13 +497,13 @@ async function fetchWeeklyTrend(state: DashboardState): Promise<void> {
                     dailyUsageMap.set(dateStr, existing + tokens);
                 }
             }
-            
+
             // Convert to WeeklyTrend format
             const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
             const trendData: WeeklyTrend[] = [];
             const usageValues = Array.from(dailyUsageMap.values());
             const maxTokens = Math.max(...usageValues, 1);
-            
+
             for (let i = 6; i >= 0; i--) {
                 const date = new Date(now);
                 date.setDate(date.getDate() - i);
@@ -457,7 +511,7 @@ async function fetchWeeklyTrend(state: DashboardState): Promise<void> {
                 const dateStr = date.toISOString().split('T')[0];
                 const tokens = dailyUsageMap.get(dateStr) || 0;
                 const dayOfWeek = (date.getDay() + 6) % 7; // Convert to Mon-Sun (0-6)
-                
+
                 trendData.push({
                     day: days[dayOfWeek],
                     date: dateStr,
@@ -466,7 +520,7 @@ async function fetchWeeklyTrend(state: DashboardState): Promise<void> {
                     percentage: maxTokens > 0 ? (tokens / maxTokens) * 100 : 0,
                 });
             }
-            
+
             state.weeklyTrend = trendData;
         }
     } catch (error) {
